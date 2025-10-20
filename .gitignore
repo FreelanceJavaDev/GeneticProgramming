@@ -18,6 +18,7 @@ Cargo.lock
 
 /target
 main.exe
+test_data/*
 test_data/CP065936_ascii_comp_pairing.exe
 test_data/CP065936_cp_sci_BW.exe
 test_data/GCA_003367075_2_ASM336707v2_genomic.fna

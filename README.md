@@ -4,8 +4,18 @@
 ## The concept
 This project began as several years ago as a joke about DNA being "God's change log". But the more I thought about it the more DNA felt like a program to me. I soon forgot about it other than as a science fiction plot device. I decided to give it a chance as a way to learn Rust that kept my interest and leverage what I learned at a genetic sequencing company in an entirely different concept.
 
+## Interesting coincidences and DNA data encoding of digital data
+There are some interesting correlations between DNA and binary encoding systems.
+While binary is a base 2 system consisting of 0 and 1. DNA can be considered a base 4 system consisting of A, T, C and G. It only takes 2 bits to represent each nucleotide uniquely as 00 (0), 01 (1), 10(2) and 11 (3).
+The remaining correlations requires some specific background knowledge about DNA sequencing, analysis and processing.
+
+There are several categories for DNA. Broadly speaking there is encoding DNA and non-encoding DNA. Encoding DNA is DNA that is used by RNA transcribers to generate amino-acid protein chains. The way a specific amino acid is chosen is directly related to a DNA base pair triplet referred to as a codon. If individual base pairs are a letter, a codon would be analogous to a word. There are a total of 4^3^ unique codons. Each encoding DNA sequence is contained between a start codon and a stop codon. There are three stop codons: TAA TGA and TAG. The start codons are a bit more complex and vary between organisms, but the one that is universally agreed to is a single codon ATG. The primary alternates are typically used for single organisms are TTG, GTG and CTG. All codons except for the stop codons map to one of twenty amino-acids.
+Non-encoding DNA is the DNA before a start codon and after a stop codon.
+
+Now for the correlations to computers. Using the 2-bit nucleotide mapping a codon would occupy 6 bits, meaning a codon can reside within a byte with two bits (one nucleotide to spare). The number of codons is  is even nicer 4^3^ comes out to 64.
+
 ## Compilation methods
-All the methods center around converting a base-4 code (A, T, C & G) into a base 2 code (0 & 1). They all involve using two bits for each base. 
+All the methods center around converting a base-4 code (A, T, C & G) into a base 2 code (0 & 1). They all involve using two bits for each base.
 Method 1. The ASCII masking & bit shift trick
 	This is the most obvious one to software engineers.
 	From the ASCII table A, C, T and G can be uniquely mapped to two bits by the bitwise expression `(Q & 0x06) >> 1`.
@@ -16,9 +26,16 @@ Method 1. The ASCII masking & bit shift trick
 Method 2. The Biological base pair complement map
 	This method is one biologists would prefer. It also makes the most sense for a program encoded in DNA. In DNA most of the time A binds with T and C binds with G. These pairings can be seen as complemental pairings.
 	This does require an ASCII table to map the sequences into the proper mapping. Though this mapping can be modified easily. The first will seem a bit like the first method.
-	The mapping that is currently implemented is A => 00, C => 01, G => 10 and T => 11
+	The 2-bit mappings that are currently implemented are:
+        M2A0C1: A => 00, C => 01, G => 10 and T => 11
+        M2A1C0: A => 01, C => 00, G => 11 and T => 10
+        M2A2C3: A => 10, C => 11, G => 00 and T => 01
+        M2A3C2: A => 11, C => 10, G => 01 and T => 00
 
-Method 3. The ASCII Table dynamic map. (unimplemented)
+Method 3. Hydrogen Bond Number (Unimplemented)
+    This method uses hydrogen bonds between the base pairs as the differentiating factor. A and T have 2 hydrogen bonds whereas C and G have three. This is why analysis of DNA frequently refers to the CG content percentage as a DNA stability metric. It also can be used to map DNA base pairs to a single bit.
+
+Method 4. The ASCII Table dynamic map. (unimplemented)
 	This mapping is a variation on the biological base pair compliment map and the remaining mappings that aren't covered under the previous methods.
 
 
@@ -34,7 +51,7 @@ uint32_t rotate_right32 (uint32_t value, uint32_t count) {
     count &= mask;
     return (value >> count) | (value << (-count & mask));
 }
- 
+
 void fcn_00061022 (void) {
     esp = rotate_right32 (esp, cl);
 }

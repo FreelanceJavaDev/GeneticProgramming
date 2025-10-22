@@ -8,13 +8,16 @@ use std::io::BufWriter;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::path::PathBuf;
+
 const REQ_ARG_NUM: usize = 3;
+#[derive(Eq, PartialEq)]
 pub enum InputFileFormat {
 	Fna,
 	Fasta,
 	Unsupported,
 }
 
+#[derive(Eq, PartialEq)]
 pub enum EncodingMethod {
 	INVALID = -2,
 	M1CS = -1, //out = (a_bp & 0x06) >> 1
@@ -22,6 +25,11 @@ pub enum EncodingMethod {
 	M2A1C0,    //A=01, C=00, G=00, T=10
 	M2A2C3,    //A=10, C=11, G=00, T=01
 	M2A3C2,    //A=11, C=10, G=01, T=00
+	M3A0C1,    //A=0, C=1, G=1, T=0
+	M3A1C0,    //A=1, C=0, G=0, T=1
+	M3A0C1XOR, //A=0, C=1, G=0, T=1
+	M3A1C0XOR, //A=1, C=0, G=1, T=0
+
 }
 // #[repr(usize)]
 // #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -33,6 +41,10 @@ pub enum EncodingMethod {
 // 	NumBases,
 // }
 
+/***
+ * A main argument parser and validator.
+ * This should never be instantiated directly.
+ */
 pub struct ParamsCK {
     pub reader: Option<BufReader<File>>,
     pub writer: Option<BufWriter<File>>,
@@ -40,7 +52,7 @@ pub struct ParamsCK {
     pub ifile_ext: InputFileFormat,
 }
 impl ParamsCK {
-    pub fn new(i_file: File, o_file: File,encode: EncodingMethod,if_ext: InputFileFormat) -> ParamsCK {
+    fn new(i_file: File, o_file: File,encode: EncodingMethod, if_ext: InputFileFormat) -> ParamsCK {
         ParamsCK {
             reader: Option::Some(BufReader::new(i_file)),
             writer: Option::Some(BufWriter::new(o_file)),
@@ -48,8 +60,24 @@ impl ParamsCK {
             ifile_ext: if_ext,
         }
     }
+	/***
+	 * Checks if the file reader and file writer actually exist.
+	*/
+	pub fn check_files(&self) -> bool { self.reader.is_some() && self.writer.is_some() }
+
+	/***
+	 * Checks all critical parameters are valid.
+	 */
+	pub fn is_req_valid(&self) -> bool {
+		self.reader.is_some() && self.writer.is_some() && self.compile_encode != EncodingMethod::INVALID && self.ifile_ext != InputFileFormat::Unsupported
+	}
 }
 impl Default for ParamsCK {
+	/***
+	 * Constructs a default initialized parameter checker.
+	 * This is only used when the `--help` or `-h` argument is used with no other arguments.
+	 * It is designed to print help information and then terminate.
+	 */
     fn default() -> ParamsCK {
         ParamsCK {
             reader: None,
@@ -60,7 +88,7 @@ impl Default for ParamsCK {
     }
 }
 
-pub fn check_input_file(in_path: &str) -> std::io::Result<File> {
+fn check_input_file(in_path: &str) -> std::io::Result<File> {
     if in_path.is_empty() {
         return Err(Error::from(ErrorKind::InvalidFilename));
     }
@@ -74,7 +102,7 @@ pub fn check_input_file(in_path: &str) -> std::io::Result<File> {
     }
 }
 
-pub fn check_output_file(dir_path: &str, out_file: &str, encode: &EncodingMethod) -> std::io::Result<File> {
+fn check_output_file(dir_path: &str, out_file: &str, encode: &EncodingMethod) -> std::io::Result<File> {
     if dir_path.is_empty() || out_file.is_empty() {
         return Err(Error::from(ErrorKind::InvalidFilename));
     }
@@ -90,6 +118,10 @@ pub fn check_output_file(dir_path: &str, out_file: &str, encode: &EncodingMethod
         EncodingMethod::M2A1C0 => "M2A1C0_".to_string(),
         EncodingMethod::M2A2C3 => "M2A2C3_".to_string(),
         EncodingMethod::M2A3C2 => "M2A3C2_".to_string(),
+		EncodingMethod::M3A0C1 => "M3A0C1_".to_string(),
+		EncodingMethod::M3A1C0 => "M3A1C0_".to_string(),
+		EncodingMethod::M3A0C1XOR => "M3A0C1XOR_".to_string(),
+		EncodingMethod::M3A1C0XOR => "M3A1C0XOR_".to_string(),
         EncodingMethod::M1CS => "M1CS_".to_string(),
         EncodingMethod::INVALID => { return Err(Error::new(ErrorKind::Other, "Invalid encoding method")); }
     };
@@ -159,7 +191,11 @@ pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<ParamsCK> {
             &"M2A1C0" => EncodingMethod::M2A1C0,
             &"M2A2C3" => EncodingMethod::M2A2C3,
             &"M2A3C2" => EncodingMethod::M2A3C2,
-            &"M1CS" => EncodingMethod::M1CS,
+			&"M3A0C1" => EncodingMethod::M3A0C1,
+			&"M3A1C0" => EncodingMethod::M3A1C0,
+			&"M3A0C1XOR" => EncodingMethod::M3A0C1XOR,
+            &"M3A1C0XOR" => EncodingMethod::M3A1C0XOR,
+			&"M1CS" => EncodingMethod::M1CS,
             _ => EncodingMethod::INVALID,
         };
         for i in 0..REQ_ARG_NUM {
@@ -180,9 +216,7 @@ pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<ParamsCK> {
         Ok(ParamsCK::new(in_file, out_file, encoding, in_format))
     } else if arg_list.len() == 2 {
         match arg_list[1].as_str() {
-            "-h" | "--help" => println!(
-                "Usage: <prog_path> --input=<path to fastfa file> --outDir=<output file directory path> --outFile=<file name>"
-            ),
+            "-h" | "--help" => println!("Usage: <prog_path> --input=<path to fastfa file> --outDir=<output file directory path> --outFile=<file name>"),
             _ => {
                 return Err(Error::new(ErrorKind::InvalidInput,"Only valid 2 argument rin is for help function."));
             }

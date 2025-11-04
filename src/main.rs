@@ -2,12 +2,27 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::BufRead;
+use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Error;
+use std::io::Read;
+use std::io::Seek;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 mod arg_parser;
+pub mod executable_header;
 use arg_parser::*;
+
+use crate::executable_header::FILE_ALIGNMENT;
+use crate::executable_header::HeaderPE;
+use crate::executable_header::ImageDataDirectory;
+use crate::executable_header::ImageNTHeaders32;
+use crate::executable_header::ImageSectionHeaderEnt;
+use crate::executable_header::InitFileHeader;
+use crate::executable_header::OptionalImageFileHeader32;
+use crate::executable_header::SECTION_ALIGNMENT;
+use crate::executable_header::ToBytes;
 /*
 enum bp_map_default{ // Y = (X & 0x06) >> 1
     A=0b00, // 'A'=01000|00|1
@@ -22,6 +37,94 @@ enum bp_map_default{ // Y = (X & 0x06) >> 1
 
 //TODO: bool codon
 
+pub struct CodonOnly {
+	pub codon_map: HashMap<u8, u8>,
+	pub bp_map: [u8; 256],
+	stop_codons: [u8; 3],
+	start_codon: u8,
+	pub bp_shift: u8,
+	pub read_frame: u8,
+	pub read_frame_used: u8,
+	pub tmp: u8,
+	pub tmp_bits_used: u8,
+	pub codon_buff: u32,
+	pub codon_buff_remain: u8,
+	pub flags: u8,
+	pub inside_codon: bool
+}
+
+impl CodonOnly {
+	pub fn new(table: &[u8; 256], encoding: EncodingMethod, b_flags: u8) ->Self {
+		CodonOnly { codon_map: HashMap::with_capacity(64), bp_map: *table, stop_codons: [0; 3], start_codon: 0,
+			bp_shift: (match encoding {
+		EncodingMethod::M3A0C1 | EncodingMethod::M3A1C0 | EncodingMethod::M3A0C1XOR | EncodingMethod::M3A1C0XOR => 1,
+		_ => 2,
+	}), read_frame: 0, read_frame_used: 0, tmp: 0, tmp_bits_used: 0, codon_buff: 0, codon_buff_remain: 0, flags: b_flags, inside_codon: false }
+	}
+
+	pub fn dyn_init(&mut self) {
+		const BP_MAP: [usize; 4] = ['A' as usize, 'C' as usize, 'G' as usize, 'T' as usize];
+    	const BP_MAP_STR: [u8; 4] = [b'A', b'C', b'G', b'T'];
+		let bp_shifts: [u8; 2] = [1*self.bp_shift, 2*self.bp_shift];
+		let mut str_codon: HashMap<String, u8> = HashMap::with_capacity(64);
+		match self.flags & 0x1 {
+			1 =>  {
+				self.start_codon = (self.bp_map[BP_MAP[0]] << bp_shifts[1]) + (self.bp_map[BP_MAP[3]] << bp_shifts[0]) + self.bp_map[BP_MAP[2]]; // ATG
+				self.stop_codons = [
+					(self.bp_map[BP_MAP[3]] << bp_shifts[1]) + (self.bp_map[BP_MAP[0]] << bp_shifts[0]) + self.bp_map[BP_MAP[0]], //TAA
+					(self.bp_map[BP_MAP[3]] << bp_shifts[1]) + (self.bp_map[BP_MAP[2]] << bp_shifts[0]) + self.bp_map[BP_MAP[0]], //TGA
+					(self.bp_map[BP_MAP[3]] << bp_shifts[1]) + (self.bp_map[BP_MAP[0]] << bp_shifts[0]) + self.bp_map[BP_MAP[2]], //TAG
+				];
+				for first in 0..BP_MAP.len() {
+					for second in 0..BP_MAP.len() {
+						for third in 0..BP_MAP.len() {
+							let key_next: u8 = (self.bp_map[BP_MAP[first]] << bp_shifts[1]) | (self.bp_map[BP_MAP[second]] << bp_shifts[0]) | self.bp_map[BP_MAP[third]];
+							str_codon.insert(String::from_utf8(vec![BP_MAP_STR[first],BP_MAP_STR[second],BP_MAP_STR[third],]).unwrap(),key_next);
+						}
+					}
+				}
+			},
+			0 =>  {
+				self.start_codon = (self.bp_map[BP_MAP[2]] << bp_shifts[1]) + (self.bp_map[BP_MAP[3]] << bp_shifts[0]) + self.bp_map[BP_MAP[0]]; // ATG
+				self.stop_codons = [
+					(self.bp_map[BP_MAP[0]] << bp_shifts[1]) + (self.bp_map[BP_MAP[0]] << bp_shifts[0]) + self.bp_map[BP_MAP[3]], //TAA
+					(self.bp_map[BP_MAP[0]] << bp_shifts[1]) + (self.bp_map[BP_MAP[2]] << bp_shifts[0]) + self.bp_map[BP_MAP[3]], //TGA
+					(self.bp_map[BP_MAP[2]] << bp_shifts[1]) + (self.bp_map[BP_MAP[0]] << bp_shifts[0]) + self.bp_map[BP_MAP[3]], //TAG
+				];
+				for first in 0..BP_MAP.len() {
+					for second in 0..BP_MAP.len() {
+						for third in 0..BP_MAP.len() {
+							let key_next: u8 = (self.bp_map[BP_MAP[third]] << bp_shifts[1]) | (self.bp_map[BP_MAP[second]] << bp_shifts[0]) | self.bp_map[BP_MAP[first]];
+							str_codon.insert(String::from_utf8(vec![BP_MAP_STR[first],BP_MAP_STR[second],BP_MAP_STR[third],]).unwrap(),key_next);
+						}
+					}
+				}
+			},
+			_ => unreachable!(),
+		}
+		self.gen_codon_map_raw(str_codon);
+
+	}
+
+	fn gen_codon_map_raw(&mut self, str_map: HashMap<String, u8>) {
+		for item in str_map {
+			if self.codon_map.contains_key(&item.1) { continue; }
+			match item.0.as_str() {
+				_ => { self.codon_map.insert(item.1, item.1); },
+			}
+		}
+	}
+
+	pub fn is_stop_codon(&self, codon_val: u8) -> bool {
+		let ck: u8 = self.codon_map[&codon_val];
+    	ck == self.stop_codons[0] || ck == self.stop_codons[1] || ck == self.stop_codons[2]
+	}
+
+	pub fn is_start_codon(&self, codon_val: u8) -> bool {
+		let ck: u8 = self.codon_map[&codon_val];
+    	ck == self.start_codon
+	}
+}
 
 
 /***
@@ -30,16 +133,20 @@ enum bp_map_default{ // Y = (X & 0x06) >> 1
 pub struct Params {
     reader: BufReader<File>,
     writer: BufWriter<File>,
+	code_fd: File,
+	ln_read_buf: String,
     compile_encode: EncodingMethod,
     ifile_ext: InputFileFormat,
+	flags: u8, // b0: 0= lsb offset shifting, 1= simple fixed bit shift, b1=codons?, b2=in-place(1) or contiguous(0) data/code for codons. b3=codon inside = code(0) or data(1)
 }
 impl Params {
-    pub fn new(ck: ParamsCK) -> Params {
-        Params {reader: ck.reader.unwrap(), writer: ck.writer.unwrap(),compile_encode: ck.compile_encode, ifile_ext: ck.ifile_ext}
+    pub fn from(ck: ParamsCK) -> Params {
+        Params {reader: ck.reader.unwrap(), writer: ck.writer.unwrap(), code_fd: OpenOptions::new().write(true).create(true).read(true).open(ck.code_fp.unwrap().as_os_str()).unwrap(), ln_read_buf: String::new(), compile_encode: ck.compile_encode, ifile_ext: ck.ifile_ext, flags: ck.flags }
     }
     /**
      * Generates Base Pair value map based on encoding scheme.
-     * Returns a 4-element array that stores the BP values in the following base pair mapping: [A, C, G, T]
+	 *
+     * Returns a 4-element byte array that stores the BP values in the following base pair order: [A, C, G, T]
      */
     pub fn bp_val_map(&self) -> [u8; 4] {
         match self.compile_encode {
@@ -55,14 +162,14 @@ impl Params {
 			EncodingMethod::INVALID => [255, 255, 255, 255],
         }
     }
+	pub fn is_read_buf_empty(&self) -> bool { self.ln_read_buf.is_empty() }
+
 }
 
 const BUFFER_SIZE: usize = 1024;
 const NOOP_CODE: u8 = 0x90;
 const INT3_CODE: u8 = 0xCC;
 const CODON_BIT_MASK: u8 = 0b00111111;
-const CODON_START_VAL: u8 = 0xFF;
-const CODON_STOP_VAL: u8 = 0xCB;
 const CODON_BITS_LEN: u8 = 6;
 const TEMP_BUFF_BITS: u8 = u8::BITS as u8;
 
@@ -125,35 +232,19 @@ fn generate_codon_map(bp_table: &mut [u8; 256]) -> HashMap<u8, u8> {
     }
     return h_map;
 }
-fn codon_main() -> std::io::Result<()> {
-    const BP_MAP: [usize; 8] = ['A' as usize, 'a' as usize, 'C' as usize, 'c' as usize, 'G' as usize, 'g' as usize, 'T' as usize, 't' as usize,];
-    let mut table: [u8; 256] = [255; 256];
-    table[BP_MAP[0]] = 0;
-    table[BP_MAP[1]] = 0;
-    table[BP_MAP[2]] = 1;
-    table[BP_MAP[3]] = 1;
-    table[BP_MAP[4]] = 2;
-    table[BP_MAP[5]] = 2;
-    table[BP_MAP[6]] = 3;
-    table[BP_MAP[7]] = 3;
-    let main_args: Vec<String> = env::args().collect();
-    let check = parse_main_args(&main_args)?;
-    if check.reader.is_none() || check.writer.is_none() {
 
-        return Ok(());
-    }
-    let mut params: Params = Params::new(check);
-    let codon_map: HashMap<u8, u8> = generate_codon_map(&mut table);
-    let stop_codons: [u8; 3] = [
-        (table[BP_MAP[6]] << 4) + (table[BP_MAP[0]] << 2) + table[BP_MAP[0]], //TAA
-        (table[BP_MAP[6]] << 4) + (table[BP_MAP[4]] << 2) + table[BP_MAP[0]], //TGA
-        (table[BP_MAP[6]] << 4) + (table[BP_MAP[0]] << 2) + table[BP_MAP[4]], //TAG
-    ];
-    let start_codon: u8 = (table[BP_MAP[0]] << 4) + (table[BP_MAP[6]] << 2) + table[BP_MAP[4]]; //ATG
-    let mut buffer = String::new();
-    buf_line_reader(&mut params.reader, &mut buffer).unwrap_or_else(|e| {
-        panic!("Failed to read line in open input file: {}", e);
-    });
+fn codon_lsb_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::io::Result<()> {
+
+	Ok(())
+}
+
+
+fn codon_msb_simple_left_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::io::Result<()> {
+    const BP_MAP: [usize; 8] = ['A' as usize, 'a' as usize, 'C' as usize, 'c' as usize, 'G' as usize, 'g' as usize, 'T' as usize, 't' as usize];
+	let mut codon_dt = CodonOnly::new(table, params.compile_encode, params.flags);
+	codon_dt.dyn_init();
+	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
+    buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
     let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 	let mut codon_write_buf: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     let mut codon_write_buf_size: usize = 0;
@@ -161,24 +252,23 @@ fn codon_main() -> std::io::Result<()> {
     let mut buff_2bit_size: usize = 0;
     let mut read_frame : u8 = 0; // 6bits
 	let mut read_frame_used : u8 = 0;
-	let mut inside_codon: bool = false;
 	let mut codon_buff: u64 = 0;
 	let mut codon_buff_remain: u8 = 64;
 	let mut temp_bits_used: u8 = 0;
     let mut total_bytes_written: u64 = 0;
-    while !buffer.is_empty() {
-        for c in buffer.bytes() {
+    while !params.ln_read_buf.is_empty() {
+        for c in params.ln_read_buf.bytes() {
 			read_frame <<= 2;
-			read_frame += table[c as usize]; // Method 2
+			read_frame += codon_dt.bp_map[c as usize];
 			read_frame_used += 2;
 			if read_frame_used < CODON_BITS_LEN { continue; }
             if read_frame_used == TEMP_BUFF_BITS {
                 read_frame &= CODON_BIT_MASK;
                 read_frame_used -= 2;
             }
-			else if !inside_codon {
-				inside_codon = *(codon_map.get(&read_frame).unwrap()) == start_codon;
-				if !inside_codon {
+			else if !codon_dt.inside_codon {
+				codon_dt.inside_codon = codon_dt.is_start_codon(read_frame);
+				if !codon_dt.inside_codon {
 					buff_2bit_temp <<= 2;
 					buff_2bit_temp += read_frame >> 4;
 					temp_bits_used += 2;
@@ -198,7 +288,7 @@ fn codon_main() -> std::io::Result<()> {
 					read_frame = 0;
 					codon_buff_remain -= 8;
 					read_frame_used = 0;
-					total_bytes_written += buf_writer_align(&mut params.writer, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')?;
+					//total_bytes_written += buf_writer_align(&mut code_bw, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')?;
 				}
 			}
 			else {
@@ -206,8 +296,8 @@ fn codon_main() -> std::io::Result<()> {
 				// 	read_frame &= CODON_BIT_MASK;
 				// 	read_frame_used -= 2;
 				// }
-                inside_codon = is_stop_codon(*(codon_map.get(&read_frame).unwrap()), stop_codons);
-                if inside_codon {
+                codon_dt.inside_codon = codon_dt.is_stop_codon(read_frame);
+                if codon_dt.inside_codon {
                     if codon_buff_remain >= read_frame_used {
                         codon_buff <<= read_frame_used;
                         codon_buff += read_frame as u64;
@@ -216,7 +306,7 @@ fn codon_main() -> std::io::Result<()> {
                         read_frame = 0;
                 	}
                     else {
-                        total_bytes_written += buf_64_mod_6_align(&mut params.writer, &mut codon_write_buf, &mut codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
+                        //total_bytes_written += buf_64_mod_6_align(&mut code_bw, &mut codon_write_buf, &mut codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
                     }
                 }
                 else {
@@ -227,7 +317,7 @@ fn codon_main() -> std::io::Result<()> {
 
                 	// }
                     if codon_write_buf_size+8 > BUFFER_SIZE  {
-                        total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+                        //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
                         codon_write_buf_size = 0;
                     }
                     for off in 7..=0 {
@@ -239,7 +329,7 @@ fn codon_main() -> std::io::Result<()> {
                     codon_write_buf_size += 8;
                     let align = if (codon_write_buf_size+1) % 16 != 0 { (codon_write_buf_size+1) % 16 } else { 15 };
                     if codon_write_buf_size+align > BUFFER_SIZE {
-                        total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+                        //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
                         codon_write_buf_size = 0;
                     }
 
@@ -251,22 +341,20 @@ fn codon_main() -> std::io::Result<()> {
                     //     codon_write_buf[codon_write_buf_size+a] = NOOP_CODE;
                     // }
                     // codon_write_buf_size += align;
-                    total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+                    //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
                     codon_write_buf_size = 0;
                 }
             }
         }
-        buffer.clear();
-        buf_line_reader(&mut params.reader, &mut buffer).unwrap_or_else(|e| {
-            panic!("Failed to read line in open input file: {}", e);
-        });
+        params.ln_read_buf.clear();
+        buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
     }
     // if read_frame_used < CODON_BITS_LEN { todo!(); }
     if read_frame_used == TEMP_BUFF_BITS {
         read_frame &= CODON_BIT_MASK;
         read_frame_used -= 2;
     }
-    if !inside_codon {
+    if !codon_dt.inside_codon {
 
        (buff_2bit_temp, temp_bits_used, read_frame,read_frame_used) = eof_8_mod_6(buff_2bit_temp, temp_bits_used, read_frame, read_frame_used);
 
@@ -282,14 +370,14 @@ fn codon_main() -> std::io::Result<()> {
                 read_frame_used = 0;
             }
             if buff_2bit_size == BUFFER_SIZE {
-                total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
+                //total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
                 buff_2bit_size = 0;
             }
         }
-        total_bytes_written += buf_writer_align(&mut params.writer, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')? as u64;
+        //total_bytes_written += buf_writer_align(&mut params.writer, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')? as u64;
     }
     else {
-        let align_fill: u8 = if  read_frame_used == 6 && is_stop_codon(*(codon_map.get(&read_frame).unwrap()), stop_codons) { read_frame } else { INT3_CODE };
+        let align_fill: u8 = if  read_frame_used == 6 && codon_dt.is_stop_codon(read_frame) { read_frame } else { INT3_CODE };
 
         if align_fill != INT3_CODE {
             if codon_buff_remain >= read_frame_used {
@@ -300,18 +388,18 @@ fn codon_main() -> std::io::Result<()> {
                 read_frame = 0;
             }
             else {
-                total_bytes_written += buf_64_mod_6_align(&mut params.writer, &mut codon_write_buf, &mut codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
+                //total_bytes_written += buf_64_mod_6_align(&mut params.writer, &mut codon_write_buf, &mut codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
 
             }
             // if codon_buff_remain > 0 {
             //     codon_buff <<= codon_buff_remain;
             // }
             if codon_write_buf_size+8 > BUFFER_SIZE  {
-                total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+                //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
                 codon_write_buf_size = 0;
             }
             for off in 7..=0 {
-                codon_write_buf[codon_write_buf_size+off] = codon_buff as u8;
+                //codon_write_buf[codon_write_buf_size+off] = codon_buff as u8;
                 codon_buff >>= 8;
             }
             codon_buff = 0;
@@ -323,7 +411,7 @@ fn codon_main() -> std::io::Result<()> {
             //     codon_buff <<= codon_buff_remain;
             // }
             if codon_write_buf_size+8 > BUFFER_SIZE  {
-                total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+                //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
                 codon_write_buf_size = 0;
             }
             for off in 7..=0 {
@@ -339,7 +427,7 @@ fn codon_main() -> std::io::Result<()> {
 
         let align = if (codon_write_buf_size+1) % 16 != 0 { (codon_write_buf_size+1) % 16 } else { 15 } ;
         if codon_write_buf_size+align > BUFFER_SIZE {
-            total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+            //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
             codon_write_buf_size = 0;
         }
 
@@ -351,7 +439,7 @@ fn codon_main() -> std::io::Result<()> {
             codon_write_buf[codon_write_buf_size+a] = INT3_CODE;
         }
         codon_write_buf_size += align;
-        total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
+        //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
         codon_write_buf_size = 0;
     }
 
@@ -377,66 +465,44 @@ fn codon_main() -> std::io::Result<()> {
     //     buff_2bit_size = 0;
     // }
     // println!("");
-    params.writer.flush()?;
+    code_bw.flush()?;
 
     Ok(())
 }
-fn main() -> std::io::Result<()> {
-    const BP_MAP: [usize; 8] = ['A' as usize, 'a' as usize, 'C' as usize, 'c' as usize, 'G' as usize, 'g' as usize, 'T' as usize, 't' as usize,];
-    let mut table: [u8; 256] = [255; 256];
-    let main_args: Vec<String> = env::args().collect();
-    let check = parse_main_args(&main_args)?;
-    if !check.check_files() {
-        return Ok(());
-    }
-	if !check.is_req_valid() { Error::new(std::io::ErrorKind::InvalidData, "Parameters are invalid!"); }
-    let mut params: Params = Params::new(check);
-    let bp_map_val: [u8; 4] = params.bp_val_map();
-    table[BP_MAP[0]] = bp_map_val[0];
-    table[BP_MAP[1]] = bp_map_val[0];
-    table[BP_MAP[2]] = bp_map_val[1];
-    table[BP_MAP[3]] = bp_map_val[1];
-    table[BP_MAP[4]] = bp_map_val[2];
-    table[BP_MAP[5]] = bp_map_val[2];
-    table[BP_MAP[6]] = bp_map_val[3];
-    table[BP_MAP[7]] = bp_map_val[3];
+
+fn ms_bit_first_main(mut params: &mut Params, &mut table: &mut [u8; 256]) -> std::io::Result<()> {
 	let bp_shift: u8 = match params.compile_encode {
 		EncodingMethod::M3A0C1 | EncodingMethod::M3A1C0 | EncodingMethod::M3A0C1XOR | EncodingMethod::M3A1C0XOR => 1,
 		_ => 2,
 	};
-    let mut buffer = String::new();
-    buf_line_reader(&mut params.reader, &mut buffer).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
+	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
+    buf_line_reader(&mut params.reader, &mut params.ln_read_buf).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
     let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 	let mut buff_2bit_temp: u8 = 0;
     let mut buff_2bit_size: usize = 0;
     let mut temp_bits_used: u8 = 0;
     let mut total_bytes_written: u64 = 0;
-    while !buffer.is_empty() {
-        for c in buffer.bytes() {
+    while !params.is_read_buf_empty() {
+        for c in params.ln_read_buf.bytes() {
 			buff_2bit_temp <<= bp_shift;
-			// Method 1: buff_2bit_temp += (c & 0x06) >> 1; //table[c as usize]; //<< temp_bits_used;
-			buff_2bit_temp += table[c as usize]; // Method 2
+			buff_2bit_temp += table[c as usize];
 			temp_bits_used += bp_shift;
 			if temp_bits_used == TEMP_BUFF_BITS {
-				// print!(" ");
-				// print!("{:0>8b} ", buff_2bit_temp);
 				buff_2bit[buff_2bit_size] = buff_2bit_temp;
 				temp_bits_used = 0;
 				buff_2bit_temp = 0;
 				buff_2bit_size += 1;
 				if buff_2bit_size == BUFFER_SIZE {
-					total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
+					total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
                     buff_2bit_size = 0;
 				}
 			}
         }
-        buffer.clear();
-        buf_line_reader(&mut params.reader, &mut buffer).unwrap_or_else(|e| {
-            panic!("Failed to read line in open input file: {}", e);
-        });
+        params.ln_read_buf.clear();
+        buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
     }
     if buff_2bit_size == BUFFER_SIZE {
-        total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
+        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
         buff_2bit_size = 0;
     }
     if temp_bits_used > 0 {
@@ -447,23 +513,181 @@ fn main() -> std::io::Result<()> {
 
     }
     if buff_2bit_size > 0 {
-        total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
+        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
         buff_2bit_size = 0;
     }
     let align = total_bytes_written % (size_of::<usize>() as u64); //align to system default word bit size. Expect 64 most of the time
     if align != 0 {
-        //println!("padding: {} bytes", align);
         for i in 0..align as usize {
             buff_2bit[i] = NOOP_CODE;
             buff_2bit_size += 1;
         }
-        total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
+        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
         buff_2bit_size = 0;
     }
-    //println!("");
-    params.writer.flush()?;
+    code_bw.flush()?;
 
     Ok(())
+}
+
+fn ls_bit_first_main(mut params: &mut Params, &mut table: &mut [u8; 256]) -> std::io::Result<()> {
+	let bp_shift: u8 = match params.compile_encode {
+		EncodingMethod::M3A0C1 | EncodingMethod::M3A1C0 | EncodingMethod::M3A0C1XOR | EncodingMethod::M3A1C0XOR => 1,
+		_ => 2,
+	};
+	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
+    buf_line_reader(&mut params.reader, &mut params.ln_read_buf).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
+    let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+	let mut buff_2bit_temp: u8 = 0;
+    let mut buff_2bit_size: usize = 0;
+    let mut temp_bits_used: u8 = 0;
+    let mut total_bytes_written: u64 = 0;
+    while !params.is_read_buf_empty() {
+        for c in params.ln_read_buf.bytes() {
+			buff_2bit_temp += (table[c as usize]) << temp_bits_used;
+			temp_bits_used += bp_shift;
+			if temp_bits_used == TEMP_BUFF_BITS {
+				buff_2bit[buff_2bit_size] = buff_2bit_temp;
+				temp_bits_used = 0;
+				buff_2bit_temp = 0;
+				buff_2bit_size += 1;
+				if buff_2bit_size == BUFFER_SIZE {
+					total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
+                    buff_2bit_size = 0;
+				}
+			}
+        }
+        params.ln_read_buf.clear();
+        buf_line_reader(&mut params.reader, &mut params.ln_read_buf).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
+    }
+    if buff_2bit_size == BUFFER_SIZE {
+        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
+        buff_2bit_size = 0;
+    }
+    if temp_bits_used > 0 {
+        buff_2bit[buff_2bit_size] = buff_2bit_temp;
+        temp_bits_used = 0;
+        buff_2bit_temp = 0;
+        buff_2bit_size += 1;
+
+    }
+    if buff_2bit_size > 0 {
+        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
+        buff_2bit_size = 0;
+    }
+    let align = total_bytes_written % (size_of::<usize>() as u64); //align to system default word bit size. Expect 64 most of the time
+    if align != 0 {
+        for i in 0..align as usize {
+            buff_2bit[i] = NOOP_CODE;
+            buff_2bit_size += 1;
+        }
+        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
+        buff_2bit_size = 0;
+    }
+    code_bw.flush()?;
+    Ok(())
+}
+
+const fn get_header_size(num_sections: usize) -> usize {
+	use std::mem::size_of;
+	size_of::<InitFileHeader>() + size_of::<ImageNTHeaders32>() + (size_of::<ImageSectionHeaderEnt>() * num_sections)
+}
+
+fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
+	let code_size: u64 = params.code_fd.metadata()?.len();
+	let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
+	temp_reader.rewind()?;
+	let m32_code_size = code_size as u32;
+	//println!("code size: {code_size} == {m32_code_size}");
+	let header_data_len: u32 = get_header_size(1) as u32;
+	let header_align: u32 = (match header_data_len % FILE_ALIGNMENT {
+		0 => header_data_len/FILE_ALIGNMENT,
+		_ => (header_data_len/FILE_ALIGNMENT) + 1,
+	}) * FILE_ALIGNMENT;
+	let va_header_offset: u32 = (match header_data_len % SECTION_ALIGNMENT {
+		0 => header_data_len/SECTION_ALIGNMENT,
+		_ => (header_data_len/SECTION_ALIGNMENT) + 1,
+	}) * SECTION_ALIGNMENT;
+	let va_data_addr_offset: u32 = va_header_offset + (match m32_code_size % SECTION_ALIGNMENT {
+		0 => m32_code_size/SECTION_ALIGNMENT,
+		_ => (m32_code_size/SECTION_ALIGNMENT) + 1,
+	}) * SECTION_ALIGNMENT;
+
+	let data_dir_list: [ImageDataDirectory; 16] = [
+		ImageDataDirectory::default(), ImageDataDirectory::default(), ImageDataDirectory::default(),
+		ImageDataDirectory::default(), ImageDataDirectory::default(),
+		/*ImageDataDirectory::with_parameters(va_reloc_addr_offset, SECTION_ALIGNMENT),*/ ImageDataDirectory::default(), //base addr relocation table
+		ImageDataDirectory::default(),
+		ImageDataDirectory::default(), //Architecture Specific Directory
+		ImageDataDirectory::default(), //X86 specific field
+		ImageDataDirectory::default(), ImageDataDirectory::default(),
+		ImageDataDirectory::default(), //load configuration directory
+		ImageDataDirectory::default(), ImageDataDirectory::default(), ImageDataDirectory::default(), ImageDataDirectory::default(),
+		];
+	let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_only(m32_code_size, va_header_offset, va_header_offset, va_data_addr_offset, data_dir_list);
+	let nt_header_32: ImageNTHeaders32 = ImageNTHeaders32::with_defaults(1, opt_file_header);
+	let header = HeaderPE { init_header: InitFileHeader::default(), nt_header: nt_header_32, section_header: vec![ImageSectionHeaderEnt::with_perms(*b".text\0\0\0",va_data_addr_offset-va_header_offset, va_header_offset, m32_code_size, va_header_offset, 0x60000020)]};
+	let header_buff = header.bufferize();
+	let mut bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
+	let buff_align: usize = FILE_ALIGNMENT as usize - (bytes_written % FILE_ALIGNMENT as usize);
+	let mut write_buff: [u8; SECTION_ALIGNMENT as usize] = [0x00; SECTION_ALIGNMENT as usize];
+	if buff_align < FILE_ALIGNMENT as usize {
+		bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
+	}
+	params.writer.flush()?;
+	for full_reads in 0..m32_code_size/SECTION_ALIGNMENT {
+		temp_reader.read_exact(&mut write_buff)?;
+		bytes_written += buf_writer(&mut params.writer, &write_buff, SECTION_ALIGNMENT as usize)?
+	}
+	let mut end_vec: Vec<u8> = Vec::with_capacity(SECTION_ALIGNMENT as usize);
+	let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
+	bytes_written += buf_writer(&mut params.writer, &end_vec.as_slice(), end_vec.len())?;
+	if code_data_end % SECTION_ALIGNMENT as usize > 0 {
+		write_buff = [0x00; SECTION_ALIGNMENT as usize];
+		bytes_written += buf_writer(&mut params.writer, &write_buff, SECTION_ALIGNMENT as usize -(code_data_end % SECTION_ALIGNMENT as usize))?;
+	}
+	params.writer.flush()?;
+
+	Ok(())
+}
+fn remove_temp_files(temp_dir_p: &str, temp_files: Vec<&str>) -> std::io::Result<()> {
+	for item in temp_files {
+		let mut fp = PathBuf::from(temp_dir_p);
+		fp.push(item);
+		if fp.exists() && fp.is_file() { std::fs::remove_file(fp.as_path())?; }
+	}
+	Ok(())
+}
+fn main() -> std::io::Result<()> {
+    const BP_MAP: [usize; 8] = ['A' as usize, 'a' as usize, 'C' as usize, 'c' as usize, 'G' as usize, 'g' as usize, 'T' as usize, 't' as usize,];
+    let mut table: [u8; 256] = [255; 256];
+    let main_args: Vec<String> = env::args().collect();
+    let (check, temp_path) = parse_main_args(&main_args)?;
+    if !check.check_files() {
+        return Ok(());
+    }
+	if !check.is_req_valid() { Error::new(std::io::ErrorKind::InvalidData, "Parameters are invalid!"); }
+
+	let mut params: Params = Params::from(check);
+    let bp_map_val: [u8; 4] = params.bp_val_map();
+    table[BP_MAP[0]] = bp_map_val[0];
+    table[BP_MAP[1]] = bp_map_val[0];
+    table[BP_MAP[2]] = bp_map_val[1];
+    table[BP_MAP[3]] = bp_map_val[1];
+    table[BP_MAP[4]] = bp_map_val[2];
+    table[BP_MAP[5]] = bp_map_val[2];
+    table[BP_MAP[6]] = bp_map_val[3];
+    table[BP_MAP[7]] = bp_map_val[3];
+	match params.flags {
+		0 => ls_bit_first_main(&mut params, &mut table)?,
+		1 => ms_bit_first_main(&mut params, &mut table)?,
+		_ => unreachable!(),
+	}
+	params.code_fd.sync_all()?;
+	generate_executable(&mut params)?;
+	return remove_temp_files(temp_path.as_str(),vec!["code.bin"]);
+
+
 }
 
 #[inline(always)]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::{OsString, OsStr};
 use std::fs::File;
 use std::fs::OpenOptions;
 // use std::io::BufRead;
@@ -17,7 +18,7 @@ pub enum InputFileFormat {
 	Unsupported,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Copy, Clone)]
 pub enum EncodingMethod {
 	INVALID = -2,
 	M1CS = -1, //out = (a_bp & 0x06) >> 1
@@ -48,18 +49,60 @@ pub enum EncodingMethod {
 pub struct ParamsCK {
     pub reader: Option<BufReader<File>>,
     pub writer: Option<BufWriter<File>>,
+	pub code_fp: Option<OsString>,
+	pub data_wr: Option<BufWriter<File>>,
 	pub compile_encode: EncodingMethod,
     pub ifile_ext: InputFileFormat,
+	pub flags: u8, // b0: 0= lsb offset shifting, 1= simple fixed bit shift, b1=codons?, b2=in-place(1) or contiguous(0) data/code for codons. b3=codon inside = code(0) or data(1)
 }
 impl ParamsCK {
     fn new(i_file: File, o_file: File,encode: EncodingMethod, if_ext: InputFileFormat) -> ParamsCK {
-        ParamsCK {
-            reader: Option::Some(BufReader::new(i_file)),
-            writer: Option::Some(BufWriter::new(o_file)),
-            compile_encode: encode,
-            ifile_ext: if_ext,
-        }
+		ParamsCK {
+			reader: Option::Some(BufReader::new(i_file)),
+			writer: Option::Some(BufWriter::new(o_file)),
+			code_fp: None,
+			data_wr: None,
+			compile_encode: encode,
+			ifile_ext: if_ext,
+			flags: 0
+		}
     }
+
+	fn with_flags_in_place(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8) -> ParamsCK {
+		ParamsCK {
+			reader: Option::Some(BufReader::new(i_file)),
+			writer: Option::Some(BufWriter::new(o_file)),
+			code_fp: None,
+			data_wr: None,
+			compile_encode: encode,
+			ifile_ext: if_ext,
+			flags: cond
+		}
+	}
+
+	fn with_flags_code_only(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8, code_bin: &OsStr) -> ParamsCK {
+		ParamsCK {
+			reader: Option::Some(BufReader::new(i_file)),
+			writer: Option::Some(BufWriter::new(o_file)),
+			code_fp: Option::Some(code_bin.to_os_string()),
+			data_wr: None,
+			compile_encode: encode,
+			ifile_ext: if_ext,
+			flags: cond
+		}
+	}
+
+	fn with_flags_code_and_data(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8, code_bin: &OsStr, data_bin: File) -> ParamsCK {
+		ParamsCK {
+			reader: Option::Some(BufReader::new(i_file)),
+			writer: Option::Some(BufWriter::new(o_file)),
+			code_fp: Option::Some(code_bin.to_os_string()),
+			data_wr: Option::Some(BufWriter::new(data_bin)),
+			compile_encode: encode,
+			ifile_ext: if_ext,
+			flags: cond
+		}
+	}
 	/***
 	 * Checks if the file reader and file writer actually exist.
 	*/
@@ -82,8 +125,11 @@ impl Default for ParamsCK {
         ParamsCK {
             reader: None,
             writer: None,
+			code_fp: None,
+			data_wr: None,
             compile_encode: EncodingMethod::INVALID,
             ifile_ext: InputFileFormat::Unsupported,
+			flags: 0
         }
     }
 }
@@ -135,22 +181,46 @@ fn check_output_file(dir_path: &str, out_file: &str, encode: &EncodingMethod) ->
     Ok(file_out)
 }
 
-pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<ParamsCK> {
+fn check_flags(flag_list: Vec<&str>, dir_path: &Path) -> std::io::Result<u8> {
+	if !dir_path.exists() || !dir_path.is_dir() {
+        return Err(Error::from(ErrorKind::NotFound));
+    }
+	if flag_list.is_empty() { return Ok(0); }
+	let mut ret: u8 = 0;
+	for flag_str in flag_list {
+		ret |= match flag_str {
+			"-sls"|"--simple-lshift" => 0b0001,
+			"--use-codon"|"-uc3" => 0b0010,
+			"--in-place"|"-inp" => 0b0100,
+			"--codon-data"|"-ctd" => 0b1000,
+			_ => { return Err(Error::new(ErrorKind::InvalidInput,"Unknown flag provided.")); },
+		};
+	}
+
+	match ret {
+		0b0100|0b1000|0b1100|0b0101|0b1001|0b1101 => { return Err(Error::new(ErrorKind::InvalidData, "In-place and codon data options are only valid with use-codons")); },
+		0b0110|0b1010|0b1110|0b0111|0b1011|0b1111 => { return Err(Error::new(ErrorKind::Unsupported, "Alternate Codon paths are currently unimplemented.")); },
+		_ => return Ok(ret),
+	};
+}
+
+pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<(ParamsCK, String)> {
+	let mut ret_str: String = String::new();
     if arg_list.len() >= 4 {
-        let mut a_flags: Vec<String> = Vec::new();
-        let mut a_params: Vec<String> = Vec::new();
+        let mut a_flags: Vec<&str> = Vec::new();
+        let mut a_params: Vec<&str> = Vec::new();
         for i in 1..arg_list.len() {
             if arg_list[i].starts_with("--") {
                 if arg_list[i].contains('=') {
-                    a_params.push(arg_list[i].clone());
+                    a_params.push(arg_list[i].as_str());
                 } else {
-                    a_flags.push(arg_list[i].clone());
+                    a_flags.push(arg_list[i].as_str());
                 }
             } else if arg_list[i].starts_with('-') {
                 if arg_list[i].contains('=') {
                     return Err(Error::new(ErrorKind::InvalidInput,"Invalid Input. Only flags start with -"));
                 } else {
-                    a_flags.push(arg_list[i].clone());
+                    a_flags.push(arg_list[i].as_str());
                 }
             } else {
                 return Err(Error::new(ErrorKind::InvalidInput,"Invalid Input. All user arguments start with -- or -"));
@@ -165,6 +235,7 @@ pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<ParamsCK> {
                     param_map.insert(0, val_parse[1]);
                 }
                 "--outputDir" => {
+					ret_str = String::from(val_parse[1]);
                     param_map.insert(1, val_parse[1]);
                 }
                 "--outputFile" => {
@@ -213,15 +284,21 @@ pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<ParamsCK> {
             _ => InputFileFormat::Unsupported,
         };
 
-        Ok(ParamsCK::new(in_file, out_file, encoding, in_format))
-    } else if arg_list.len() == 2 {
+		let flags: u8 = check_flags(a_flags,Path::new(&param_map[&(1 as usize)]))?;
+		let mut t_path: PathBuf = PathBuf::from(param_map[&1]);
+		t_path.push("code.bin");
+		let code_fp =  t_path.as_os_str();
+		//let code_file: File = OpenOptions::new().write(true).create(true).read(true).open(t_path.as_path())?;
+        Ok((ParamsCK::with_flags_code_only(in_file, out_file, encoding, in_format, flags, code_fp), ret_str))
+    }
+	else if arg_list.len() == 2 {
         match arg_list[1].as_str() {
             "-h" | "--help" => println!("Usage: <prog_path> --input=<path to fastfa file> --outDir=<output file directory path> --outFile=<file name>"),
             _ => {
                 return Err(Error::new(ErrorKind::InvalidInput,"Only valid 2 argument rin is for help function."));
             }
         }
-        Ok(ParamsCK::default())
+        Ok((ParamsCK::default(), ret_str))
     } else {
         return Err(Error::new(ErrorKind::InvalidInput,"Not enough arguments! Use --help for details."));
     }

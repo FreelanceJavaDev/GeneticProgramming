@@ -1,273 +1,299 @@
 
-pub trait ToBytes {
-	fn bufferize(&self) -> Vec<u8>;
+pub trait Serialize {
+	fn serialize(&self) -> Vec<u8>;
 }
 
 pub const SECTION_ALIGNMENT: u32 = 0x1000;
 pub const ALIGN_SECTION: usize = SECTION_ALIGNMENT as usize;
 pub const FILE_ALIGNMENT: u32 = 0x200;
 pub const HEADER_PADDING_BYTE: u8 = 0x00;
-#[cfg(target_os="windows")]
-#[derive(Clone)]
-#[repr(C)]
-pub struct HeaderPE {
-	pub init_header: InitFileHeader,
-	pub nt_header: ImageNTHeaders32,
-	pub section_header: Vec<ImageSectionHeaderEnt>, //0x28 bytes per entry
-} //Size is 0x1E8 + 0x28*header count, Min is 0x210, min alignment is 0x400
 
 #[cfg(target_os="windows")]
-impl HeaderPE {
-	pub fn len(&self) -> usize {
-		std::mem::size_of_val(&self.init_header) + std::mem::size_of_val(&self.nt_header) + (std::mem::size_of::<ImageSectionHeaderEnt>() * self.section_header.len())
+pub const CODE_PADDING: u8 = 0xCC; // INT3 opcode
+#[cfg(not(target_os="windows"))]
+pub const CODE_PADDING: u8 = 0x90; // NO OPERATION opcode
+#[cfg(target_os="windows")]
+pub mod win  {
+	use crate::executable_header::Serialize;
+	pub const fn get_header_size(num_sections: usize) -> usize {
+		use std::mem::size_of;
+		size_of::<InitFileHeader>() + size_of::<ImageNTHeaders32>() + (size_of::<ImageSectionHeaderEnt>() * num_sections)
 	}
-}
+	#[derive(Clone)]
+	#[repr(C)]
+	pub struct HeaderPE {
+		pub init_header: InitFileHeader,
+		pub nt_header: ImageNTHeaders32,
+		pub section_header: Vec<ImageSectionHeaderEnt> //0x28 bytes per entry
+	} //Size is 0x1E8 + 0x28*header count, Min is 0x210, min alignment is 0x400
 
-#[cfg(target_os="windows")]
-impl ToBytes for HeaderPE {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut ret: Vec<u8> =  self.init_header.bufferize();
-		ret.append(&mut self.nt_header.bufferize());
-		for sect in (&self.section_header).iter() {
-			ret.append(&mut sect.bufferize());
+	#[derive(Copy, Clone)]
+	#[repr(C)]
+	pub struct InitFileHeader {
+		pub h1: [u8; 0x80],
+		pub pad: [u8; 0x70 ]
+
+	} //size is 0xF0
+
+	#[derive(Copy, Clone)]
+	#[repr(C)]
+	pub struct ImageNTHeaders32 {
+		pub signature: u32, //Always 0x4550
+		pub file_header: ImageFileHeader,
+		pub opt_file_header: OptionalImageFileHeader32
+	} //Size is 0xF8
+	#[derive(Copy, Clone)]
+	#[repr(C)]
+	pub struct ImageFileHeader {
+		pub machine: u16, //0x014c = x86, 0x8664 = amd64/x86_64, 0x0000 = unknown/any
+		pub num_sections: u16, //Num entries in section header
+		pub td_stamp: u32, // Don't care about time-date stamp
+		pub sym_tbl_ptr: u32, /// Must be 0
+		pub num_symbols: u32, /// Must be 0
+		pub opt_header_size: u16, //Either e0 for 32-bit 0r f0 for 64-bit
+		pub characteristics: u16 //0x0102 for 32-bit, 0x22 for 64-bit
+	} //size is 0x14
+
+	#[derive(Copy, Clone)]
+	#[repr(C)]
+	pub struct OptionalImageFileHeader32 {
+		pub magic: u16, // 0x10b for 32-bit 0x20b for 64-bit
+		pub linker_ver: [u8; 2], // [major,minor]
+		pub code_size: u32,
+		pub idata_size: u32, //might be 0?
+		pub uninitialized_data_size: u32, //0
+		pub	entry_point_addr: u32, // start of code
+		pub base_of_code: u32, //base address of code section
+		pub base_of_data: u32, // Might be 0?
+		pub image_base: u32, //0x00400000 = for 32-bit
+		pub section_align: u32, //Section alignment 0x1000
+		pub file_align: u32, //raw data alignment, default: 0x200
+		pub sys_ver: [u8; 12], // Combined os, image and subsystem versions : Set as le bytes: [0x06,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x06,0x00, 0x00,0x00]
+		pub w32_version_value: u32, // Always 0
+		pub image_size: u32, //size of image in bytes rounded up to section alignment
+		pub headers_size: u32, //Default 0x400
+		pub ck_sum: u32,  //No checksum
+		pub subsystem: u16, // 0 = IMAGE_SUBSYSTEM_UNKNOWN, 2= Windows GUI application, 3= Console app,
+		pub dll_characteristics: u16, //Default 0x8740; 0x40 = DLL_CAN_MOVE, 0x100 = DLL_NX_COMPATIBLE, 0x200 = DLL_NO_ISOLATION, 0x400 = DLL_NO_SEH, 0x8000 = DLL_TERMINAL_SERVER_AWARE
+		pub stack_reserve_size: u32, // Default 0x100000
+		pub stack_commit_size: u32, // Default 0x1000
+		pub heap_reserve_size: u32, // Default 0x100000
+		pub heap_commit_size: u32, // Default 0x1000
+		pub loader_flags: u32, //Always 0
+		pub rva_num_and_sizes: u32, //always 16
+		pub data_directory: [ImageDataDirectory; 16]
+	} //size is 0xE0
+
+	#[derive(Copy, Clone)]
+	#[repr(C)]
+	pub struct ImageSectionHeaderEnt {
+		pub name: [u8; 8],
+		pub sec_size: u32, //Size of actual data
+		pub virtual_address: u32, //virtual address
+		pub size_raw_data: u32, // size of raw data aligned to file
+		pub ptr_raw_data: u32, // physical address (aligned to file)
+		pub legacy: [u8; 12], // ptr_relocs, ptr_line_nums, num_relocs and num_line_nums are always 0
+		pub characteristics: u32 //default is: 40000040  (read only, contains initialized data)
+	} //size is 0x28
+
+	#[derive(Copy, Clone)]
+	#[repr(C)]
+	pub struct ImageDataDirectory {
+		pub virtual_address: u32,
+		pub size: u32
+	}
+
+	impl HeaderPE {
+		pub fn with_defaults(sec_num: u16, opt_header: OptionalImageFileHeader32, sect_list: Vec<ImageSectionHeaderEnt>) -> Self {
+			HeaderPE { init_header: InitFileHeader::default(),
+				nt_header: ImageNTHeaders32::with_defaults(sec_num, opt_header), section_header: sect_list }
 		}
-		ret
-	}
-}
-#[cfg(target_os="windows")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct InitFileHeader {
-	pub h1: [u8; 0x80],
-	pub pad: [u8; 0x70 ],
-
-} //size is 0xF0
-
-#[cfg(target_os="windows")]
-impl Default for InitFileHeader {
-	fn default() -> InitFileHeader {
-		 InitFileHeader {
-			h1: [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
-					  0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-					  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-					  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0x00,
-					  0x0E, 0x1F, 0xBA, 0x0E, 0x00, 0xB4, 0x09, 0xCD, 0x21, 0xB8, 0x01, 0x4C, 0xCD, 0x21, 0x54, 0x68,
-					  0x69, 0x73, 0x20, 0x70, 0x72, 0x6F, 0x67, 0x72, 0x61, 0x6D, 0x20, 0x63, 0x61, 0x6E, 0x6E, 0x6F,
-					  0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6E, 0x20, 0x69, 0x6E, 0x20, 0x44, 0x4F, 0x53, 0x20,
-					  0x6D, 0x6F, 0x64, 0x65, 0x2E, 0x0D, 0x0D, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-			pad: [ 0x00; 0x70],
-		 }
 	}
 
-}
-
-#[cfg(target_os="windows")]
-impl ToBytes for InitFileHeader {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut buf: Vec<u8> = self.h1.to_vec();
-		buf.extend_from_slice(&self.pad);
-		buf
-	}
-}
-
-#[cfg(target_os="windows")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct ImageNTHeaders32 {
-	pub signature: u32, //Always 0x4550
-	pub file_header: ImageFileHeader,
-	pub opt_file_header: OptionalImageFileHeader32,
-} //Size is 0xF8
-
-#[cfg(target_os="windows")]
-impl ImageNTHeaders32 {
-	pub fn with_defaults(sec_num: u16, opt_hdr: OptionalImageFileHeader32) -> ImageNTHeaders32 {
-		ImageNTHeaders32 { signature: 0x4550, file_header: ImageFileHeader::with_defaults(sec_num),  opt_file_header: opt_hdr }
-	}
-}
-
-#[cfg(target_os="windows")]
-impl ToBytes for ImageNTHeaders32 {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut buf: Vec<u8> = self.signature.to_le_bytes().to_vec();
-		buf.append(&mut self.file_header.bufferize());
-		buf.append(&mut self.opt_file_header.bufferize());
-		buf
-	}
-}
-
-
-
-#[cfg(target_os="windows")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct ImageFileHeader {
-	pub machine: u16, //0x014c = x86, 0x8664 = amd64/x86_64, 0x0000 = unknown/any
-    pub num_sections: u16, //Num entries in section header
-    pub td_stamp: u32, // Don't care about time-date stamp
-    pub sym_tbl_ptr: u32, /// Must be 0
-    pub num_symbols: u32, /// Must be 0
-    pub opt_header_size: u16, //Either e0 for 32-bit 0r f0 for 64-bit
-    pub characteristics: u16, //0x0102 for 32-bit, 0x22 for 64-bit
-} //size is 0x14
-
-#[cfg(target_os="windows")]
-impl ImageFileHeader {
-	pub fn with_defaults(sec_num: u16) ->  ImageFileHeader {
-		ImageFileHeader { machine: 0x014c, num_sections: sec_num, td_stamp: 0, sym_tbl_ptr: 0, num_symbols: 0, opt_header_size: 0x00e0, characteristics: 0x0102 }
-	}
-	pub fn with_params(mach: u16, sec_num: u16, opt_head_size: u16, flags: u16) ->  ImageFileHeader {
-		ImageFileHeader { machine: mach, num_sections: sec_num, td_stamp: 0, sym_tbl_ptr: 0, num_symbols: 0, opt_header_size: opt_head_size, characteristics: flags }
-	}
-}
-
-#[cfg(target_os="windows")]
-impl ToBytes for ImageFileHeader {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut buf: Vec<u8> = self.machine.to_le_bytes().to_vec();
-		buf.extend_from_slice(&self.num_sections.to_le_bytes());
-		buf.extend_from_slice(&self.td_stamp.to_le_bytes());
-		buf.extend_from_slice(&self.sym_tbl_ptr.to_le_bytes());
-		buf.extend_from_slice(&self.num_symbols.to_le_bytes());
-		buf.extend_from_slice(&self.opt_header_size.to_le_bytes());
-		buf.extend_from_slice(&self.characteristics.to_le_bytes());
-		buf
-	}
-}
-
-#[cfg(target_os="windows")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct OptionalImageFileHeader32 {
-	pub magic: u16, // 0x10b for 32-bit 0x20b for 64-bit
-    pub linker_ver: [u8; 2], // [major,minor]
-    pub code_size: u32,
-    pub idata_size: u32, //might be 0?
-    pub uninitialized_data_size: u32, //0
-    pub	entry_point_addr: u32, // start of code
-    pub base_of_code: u32, //base address of code section
-    pub base_of_data: u32, // Might be 0?
-    pub image_base: u32, //0x00400000 = for 32-bit
-    pub section_align: u32, //Section alignment 0x1000
-    pub file_align: u32, //raw data alignment, default: 0x200
-    pub sys_ver: [u8; 12], // Combined os, image and subsystem versions : Set as le bytes: [0x06,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x06,0x00, 0x00,0x00]
-    pub w32_version_value: u32, // Always 0
-    pub image_size: u32, //size of image in bytes rounded up to section alignment
-    pub headers_size: u32, //Default 0x400
-    pub ck_sum: u32,  //No checksum
-    pub subsystem: u16, // 0 = IMAGE_SUBSYSTEM_UNKNOWN, 2= Windows GUI application, 3= Console app,
-    pub dll_characteristics: u16, //Default 0x8740; 0x40 = DLL_CAN_MOVE, 0x100 = DLL_NX_COMPATIBLE, 0x200 = DLL_NO_ISOLATION, 0x400 = DLL_NO_SEH, 0x8000 = DLL_TERMINAL_SERVER_AWARE
-    pub stack_reserve_size: u32, // Default 0x100000
-    pub stack_commit_size: u32, // Default 0x1000
-    pub heap_reserve_size: u32, // Default 0x100000
-    pub heap_commit_size: u32, // Default 0x1000
-    pub loader_flags: u32, //Always 0
-    pub rva_num_and_sizes: u32, //always 16
-    pub data_directory: [ImageDataDirectory; 16],
-
-} //size is 0xE0
-
-#[cfg(target_os="windows")]
-impl OptionalImageFileHeader32 {
-	pub fn with_code_only(code_sz: u32, start_addr: u32, code_base: u32, image_sz: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
-		OptionalImageFileHeader32 { magic: 0x010B, linker_ver: [0x00, 0x00], code_size: code_sz, idata_size: 0, uninitialized_data_size: 0,
-			entry_point_addr: start_addr, base_of_code: code_base, base_of_data: ((((code_sz + code_base) / 0x1000) + 1)*0x1000), image_base: 0x00400000,
-			section_align: 0x1000, file_align: 0x200, sys_ver: [0x06,0x00, 0x00,0x00, 0x00,0x00 ,0x00,0x00, 0x06,0x00, 0x00,0x00], w32_version_value: 0,
-			image_size: image_sz, headers_size: 0x400, ck_sum: 0, subsystem: 3, dll_characteristics: 0x8140, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
-			heap_commit_size: 0x1000, loader_flags: 0, rva_num_and_sizes: 0x10,
-			data_directory: data_dir }
-	}
-
-	pub fn with_params(bit_arch: u16, code_sz: u32, idata_sz: u32, start_addr: u32, code_base: u32, idata_base: u32, image_sz: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
-		OptionalImageFileHeader32 { magic: bit_arch, linker_ver: [0x0E, 0x2B], code_size: code_sz, idata_size: idata_sz, uninitialized_data_size: 0,
-			entry_point_addr: start_addr, base_of_code: code_base, base_of_data: idata_base, image_base: 0x00400000,
-			section_align: 0x1000, file_align: 0x200, sys_ver: [0x06,0x00, 0x00,0x00, 0x00,0x00 ,0x00,0x00, 0x06,0x00, 0x00,0x00], w32_version_value: 0,
-			image_size: image_sz, headers_size: 0x400, ck_sum: 0, subsystem: 0, dll_characteristics: 0x8140, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
-			heap_commit_size: 0x1000, loader_flags: 0, rva_num_and_sizes: 0x10,
-			data_directory: data_dir }
-	}
-
-}
-
-#[cfg(target_os="windows")]
-impl ToBytes for OptionalImageFileHeader32 {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut buf: Vec<u8> = self.magic.to_le_bytes().to_vec();
-		buf.extend_from_slice(&self.linker_ver);
-		buf.extend_from_slice(&self.code_size.to_le_bytes());
-		buf.extend_from_slice(&self.idata_size.to_le_bytes());
-		buf.extend_from_slice(&self.uninitialized_data_size.to_le_bytes());
-		buf.extend_from_slice(&self.entry_point_addr.to_le_bytes());
-		buf.extend_from_slice(&self.base_of_code.to_le_bytes());
-		buf.extend_from_slice(&self.base_of_data.to_le_bytes());
-		buf.extend_from_slice(&self.image_base.to_le_bytes());
-		buf.extend_from_slice(&self.section_align.to_le_bytes());
-		buf.extend_from_slice(&self.file_align.to_le_bytes());
-		buf.extend_from_slice(&self.sys_ver);
-		buf.extend_from_slice(&self.w32_version_value.to_le_bytes());
-		buf.extend_from_slice(&self.image_size.to_le_bytes());
-		buf.extend_from_slice(&self.headers_size.to_le_bytes());
-		buf.extend_from_slice(&self.ck_sum.to_le_bytes());
-		buf.extend_from_slice(&self.subsystem.to_le_bytes());
-		buf.extend_from_slice(&self.dll_characteristics.to_le_bytes());
-		buf.extend_from_slice(&self.stack_reserve_size.to_le_bytes());
-		buf.extend_from_slice(&self.stack_commit_size.to_le_bytes());
-		buf.extend_from_slice(&self.heap_reserve_size.to_le_bytes());
-		buf.extend_from_slice(&self.heap_reserve_size.to_le_bytes());
-		buf.extend_from_slice(&self.loader_flags.to_le_bytes());
-		buf.extend_from_slice(&self.rva_num_and_sizes.to_le_bytes());
-		for sub_struct in &self.data_directory {
-			buf.append(&mut sub_struct.bufferize());
+	impl ImageNTHeaders32 {
+		pub fn with_defaults(sec_num: u16, opt_hdr: OptionalImageFileHeader32) -> ImageNTHeaders32 {
+			ImageNTHeaders32 { signature: 0x4550, file_header: ImageFileHeader::with_defaults(sec_num),  opt_file_header: opt_hdr }
 		}
-		buf
 	}
+
+	impl ImageFileHeader {
+		pub fn with_defaults(sec_num: u16) ->  ImageFileHeader {
+			ImageFileHeader { machine: 0x014c, num_sections: sec_num, td_stamp: 0, sym_tbl_ptr: 0, num_symbols: 0, opt_header_size: 0x00e0, characteristics: 0x0102 }
+		}
+		pub fn with_params(mach: u16, sec_num: u16, opt_head_size: u16, flags: u16) ->  ImageFileHeader {
+			ImageFileHeader { machine: mach, num_sections: sec_num, td_stamp: 0, sym_tbl_ptr: 0, num_symbols: 0, opt_header_size: opt_head_size, characteristics: flags }
+		}
+	}
+
+	impl OptionalImageFileHeader32 {
+		pub fn with_code_only(code_sz: u32, start_addr: u32, code_base: u32, image_sz: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
+			OptionalImageFileHeader32 { magic: 0x010B, linker_ver: [0x00, 0x00], code_size: code_sz, idata_size: 0, uninitialized_data_size: 0,
+				entry_point_addr: start_addr, base_of_code: code_base, base_of_data: ((((code_sz + code_base) / 0x1000) + 1)*0x1000), image_base: 0x00400000,
+				section_align: 0x1000, file_align: 0x200, sys_ver: [0x06,0x00, 0x00,0x00, 0x00,0x00 ,0x00,0x00, 0x06,0x00, 0x00,0x00], w32_version_value: 0,
+				image_size: image_sz, headers_size: 0x400, ck_sum: 0, subsystem: 3, dll_characteristics: 0x8740, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
+				heap_commit_size: 0x1000, loader_flags: 0, rva_num_and_sizes: 0x10,
+				data_directory: data_dir
+			}
+		}
+
+		pub fn with_params(bit_arch: u16, code_sz: u32, idata_sz: u32, start_addr: u32, code_base: u32, idata_base: u32, image_sz: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
+			OptionalImageFileHeader32 { magic: bit_arch, linker_ver: [0x0E, 0x2B], code_size: code_sz, idata_size: idata_sz, uninitialized_data_size: 0,
+				entry_point_addr: start_addr, base_of_code: code_base, base_of_data: idata_base, image_base: 0x00400000,
+				section_align: 0x1000, file_align: 0x200, sys_ver: [0x06,0x00, 0x00,0x00, 0x00,0x00 ,0x00,0x00, 0x06,0x00, 0x00,0x00], w32_version_value: 0,
+				image_size: image_sz, headers_size: 0x400, ck_sum: 0, subsystem: 0, dll_characteristics: 0x8140, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
+				heap_commit_size: 0x1000, loader_flags: 0, rva_num_and_sizes: 0x10,
+				data_directory: data_dir
+			}
+		}
+	}
+
+	impl ImageSectionHeaderEnt {
+		pub fn with_defaults(s : [u8; 8], size: u32, va: u32, raw_size: u32, ptr_raw: u32) -> ImageSectionHeaderEnt {
+			ImageSectionHeaderEnt { name: s, sec_size: size, virtual_address: va, size_raw_data: raw_size, ptr_raw_data: ptr_raw,
+				legacy: [0x00; 12], characteristics: 0x40000040 }
+		}
+
+		pub fn with_perms(s : [u8; 8], size: u32, va: u32, raw_size: u32, ptr_raw: u32, perms: u32) -> ImageSectionHeaderEnt {
+			ImageSectionHeaderEnt { name: s, sec_size: size, virtual_address: va, size_raw_data: raw_size, ptr_raw_data: ptr_raw,
+				legacy: [0x00; 12], characteristics: perms }
+		}
+	}
+
+	impl ImageDataDirectory {
+		pub fn with_params(v_addr: u32, sz: u32) -> ImageDataDirectory {
+			ImageDataDirectory { virtual_address: v_addr, size: sz}
+		}
+	}
+
+	impl Default for ImageDataDirectory {
+		fn default() -> Self {
+			ImageDataDirectory { virtual_address: 0, size: 0 }
+		}
+	}
+
+	impl Default for InitFileHeader {
+		fn default() -> InitFileHeader {
+			InitFileHeader {
+				h1: [0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
+						0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+						0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0x00,
+						0x0E, 0x1F, 0xBA, 0x0E, 0x00, 0xB4, 0x09, 0xCD, 0x21, 0xB8, 0x01, 0x4C, 0xCD, 0x21, 0x54, 0x68,
+						0x69, 0x73, 0x20, 0x70, 0x72, 0x6F, 0x67, 0x72, 0x61, 0x6D, 0x20, 0x63, 0x61, 0x6E, 0x6E, 0x6F,
+						0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6E, 0x20, 0x69, 0x6E, 0x20, 0x44, 0x4F, 0x53, 0x20,
+						0x6D, 0x6F, 0x64, 0x65, 0x2E, 0x0D, 0x0D, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+				pad: [ 0x00; 0x70],
+			}
+		}
+	}
+
+
+	impl Serialize for HeaderPE {
+		fn serialize(&self) -> Vec<u8> {
+			let mut ret: Vec<u8> =  self.init_header.serialize();
+			ret.append(&mut self.nt_header.serialize());
+			for sect in (&self.section_header).iter() {
+				ret.append(&mut sect.serialize());
+			}
+			ret
+		}
+	}
+
+	impl Serialize for ImageNTHeaders32 {
+		fn serialize(&self) -> Vec<u8> {
+			let mut buf: Vec<u8> = self.signature.to_le_bytes().to_vec();
+			buf.append(&mut self.file_header.serialize());
+			buf.append(&mut self.opt_file_header.serialize());
+			buf
+		}
+	}
+
+	impl Serialize for ImageFileHeader {
+		fn serialize(&self) -> Vec<u8> {
+			let mut buf: Vec<u8> = self.machine.to_le_bytes().to_vec();
+			buf.extend_from_slice(&self.num_sections.to_le_bytes());
+			buf.extend_from_slice(&self.td_stamp.to_le_bytes());
+			buf.extend_from_slice(&self.sym_tbl_ptr.to_le_bytes());
+			buf.extend_from_slice(&self.num_symbols.to_le_bytes());
+			buf.extend_from_slice(&self.opt_header_size.to_le_bytes());
+			buf.extend_from_slice(&self.characteristics.to_le_bytes());
+			buf
+		}
+	}
+
+	impl Serialize for OptionalImageFileHeader32 {
+		fn serialize(&self) -> Vec<u8> {
+			let mut buf: Vec<u8> = self.magic.to_le_bytes().to_vec();
+			buf.extend_from_slice(&self.linker_ver);
+			buf.extend_from_slice(&self.code_size.to_le_bytes());
+			buf.extend_from_slice(&self.idata_size.to_le_bytes());
+			buf.extend_from_slice(&self.uninitialized_data_size.to_le_bytes());
+			buf.extend_from_slice(&self.entry_point_addr.to_le_bytes());
+			buf.extend_from_slice(&self.base_of_code.to_le_bytes());
+			buf.extend_from_slice(&self.base_of_data.to_le_bytes());
+			buf.extend_from_slice(&self.image_base.to_le_bytes());
+			buf.extend_from_slice(&self.section_align.to_le_bytes());
+			buf.extend_from_slice(&self.file_align.to_le_bytes());
+			buf.extend_from_slice(&self.sys_ver);
+			buf.extend_from_slice(&self.w32_version_value.to_le_bytes());
+			buf.extend_from_slice(&self.image_size.to_le_bytes());
+			buf.extend_from_slice(&self.headers_size.to_le_bytes());
+			buf.extend_from_slice(&self.ck_sum.to_le_bytes());
+			buf.extend_from_slice(&self.subsystem.to_le_bytes());
+			buf.extend_from_slice(&self.dll_characteristics.to_le_bytes());
+			buf.extend_from_slice(&self.stack_reserve_size.to_le_bytes());
+			buf.extend_from_slice(&self.stack_commit_size.to_le_bytes());
+			buf.extend_from_slice(&self.heap_reserve_size.to_le_bytes());
+			buf.extend_from_slice(&self.heap_reserve_size.to_le_bytes());
+			buf.extend_from_slice(&self.loader_flags.to_le_bytes());
+			buf.extend_from_slice(&self.rva_num_and_sizes.to_le_bytes());
+			for sub_struct in &self.data_directory {
+				buf.append(&mut sub_struct.serialize());
+			}
+			buf
+		}
+	}
+
+	impl Serialize for ImageSectionHeaderEnt {
+		fn serialize(&self) -> Vec<u8> {
+			let mut buf: Vec<u8> = self.name.to_vec();
+			buf.extend_from_slice(&self.sec_size.to_le_bytes());
+			buf.extend_from_slice(&self.virtual_address.to_le_bytes());
+			buf.extend_from_slice(&self.size_raw_data.to_le_bytes());
+			buf.extend_from_slice(&self.ptr_raw_data.to_le_bytes());
+			buf.extend_from_slice(&self.legacy);
+			buf.extend_from_slice(&self.characteristics.to_le_bytes());
+			buf
+		}
+	}
+
+	impl Serialize for InitFileHeader {
+		fn serialize(&self) -> Vec<u8> {
+			let mut buf: Vec<u8> = self.h1.to_vec();
+			buf.extend_from_slice(&self.pad);
+			buf
+		}
+	}
+
+	impl Serialize for ImageDataDirectory {
+		fn serialize(&self) -> Vec<u8> {
+			let mut buf: Vec<u8> = self.virtual_address.to_le_bytes().to_vec();
+			buf.extend_from_slice(&self.size.to_le_bytes());
+			buf
+		}
+	}
+
 }
-
-#[cfg(target_os="windows")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct ImageSectionHeaderEnt {
-	pub name: [u8; 8],
-	pub sec_size: u32,
-	pub virtual_address: u32,
-    pub size_raw_data: u32,
-    pub ptr_raw_data: u32,
-    pub legacy: [u8; 12], // ptr_relocs, ptr_line_nums, num_relocs and num_line_nums are always 0
-    pub characteristics: u32, //default is: 40000040  (read only, contains initialized data)
-} //size is 0x28
-
-#[cfg(target_os="windows")]
-impl ImageSectionHeaderEnt {
-	pub fn with_defaults(s : [u8; 8], size: u32, va: u32, raw_size: u32, ptr_raw: u32) -> ImageSectionHeaderEnt {
-		ImageSectionHeaderEnt { name: s, sec_size: size, virtual_address: va, size_raw_data: raw_size, ptr_raw_data: ptr_raw,
-			legacy: [0x00; 12], characteristics: 0x40000040 }
-	}
-
-	pub fn with_perms(s : [u8; 8], size: u32, va: u32, raw_size: u32, ptr_raw: u32, perms: u32) -> ImageSectionHeaderEnt {
-		ImageSectionHeaderEnt { name: s, sec_size: size, virtual_address: va, size_raw_data: raw_size, ptr_raw_data: ptr_raw,
-			legacy: [0x00; 12], characteristics: perms }
-	}
-}
-
-#[cfg(target_os="windows")]
-impl ToBytes for ImageSectionHeaderEnt {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut buf: Vec<u8> = self.name.to_vec();
-		buf.extend_from_slice(&self.sec_size.to_le_bytes());
-		buf.extend_from_slice(&self.virtual_address.to_le_bytes());
-		buf.extend_from_slice(&self.size_raw_data.to_le_bytes());
-		buf.extend_from_slice(&self.ptr_raw_data.to_le_bytes());
-		buf.extend_from_slice(&self.legacy);
-		buf.extend_from_slice(&self.characteristics.to_le_bytes());
-		buf
-	}
-}
-
-
-
-
 
 #[cfg(target_os="linux")]
+pub mod linux {
+	use crate::executable_header::Serialize;
+	const ELF32_VADDR_OFFSET: u32 = 0x08048000;
+	pub const fn get_header_size(num_prog_headers: usize, num_sections: usize) -> usize {
+		use std::mem::size_of;
+		size_of::<ELF32Header>() + (size_of::<ELF32ProgHeaderEnt>()*num_prog_headers)  + (size_of::<ELF32SectHeaderEnt>() * num_sections) + 24
+	}
+
 #[derive(Clone)]
 #[repr(C)]
 pub struct FileHeader {
@@ -281,9 +307,8 @@ pub struct FileHeader {
 	pub e_ver: u32, //Always 1,
 	pub e_dyn_elf: ELF32Header,
 	pub prog_headers: Vec<ELF32ProgHeaderEnt>,
-	pub sect_headers: Vec<ELF32SectHeaderEnt>
+	//pub sect_headers: Vec<ELF32SectHeaderEnt>
 }
-#[cfg(target_os="linux")]
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct ELF32Header {
@@ -299,16 +324,6 @@ pub struct ELF32Header {
 	pub sh_str_ndx: u16
 }
 
-#[cfg(target_os="linux")]
-impl ELF32Header {
-	pub fn new(start_addr: u32, shead_off: u32, num_ph: u16, num_sh: u16, sh_str_idx: u16) -> Self {
-		ELF32Header { e_start_addr: start_addr, phead_off: 0x34, sheader_off: shead_off, flags: 0, eh_size: 52,
-			pheadent_size: 32, ph_num: num_ph, shead_size: 40, shead_num: num_sh, sh_str_ndx: sh_str_idx
-		}
-	}
-}
-
-#[cfg(target_os="linux")]
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct ELF32ProgHeaderEnt {
@@ -322,39 +337,77 @@ pub struct ELF32ProgHeaderEnt {
 	pub p_align: u32 //Address alignment, typically 0x04 or 0x1000
 }
 
-#[cfg(target_os="linux")]
-impl ELF32ProgHeaderEnt {
-	pub fn new(size: u32) -> Self { //PHDR ONLY
-		ELF32ProgHeaderEnt { pt_type: 0x06, p_off: 0x34, p_vaddr: 0x34, p_paddr: 0x34, p_file_size: size,
-			p_mem_size: size, p_flags: 0x04, p_align: 0x4
-		}
-	}
-	pub fn with_params(kind: u32, off: u32, addr: u32, size: u32, align: u32) -> Self {
-		ELF32ProgHeaderEnt { pt_type: kind, p_off: off, p_vaddr: addr, p_paddr: addr, p_file_size: size, p_mem_size: size, p_flags: 0x4, p_align: align }
-	}
-
-	pub fn with_params_flags(kind: u32, off: u32, addr: u32, size: u32, flags: u32, align: u32) -> Self {
-		ELF32ProgHeaderEnt { pt_type: kind, p_off: off, p_vaddr: addr, p_paddr: addr, p_file_size: size, p_mem_size: size, p_flags: flags, p_align: align }
-	}
-}
-
-#[cfg(target_os="linux")]
 #[derive(Copy, Clone)]
 #[repr(C)]
-pub struct ELF32SectHeaderEnt {
-	sh_name: u32, //Section Header symbol table offset
-	sh_type: u32,
-	sh_flags: u32,
-	sh_vaddr: u32,
-	sh_offset: u32,
-	sh_size: u32, //can be 0
-	sh_link: u32,
-	sh_info: u32, //Extra info about section
-	sh_addralign: u32,
-	sh_entsize: u32 // Can be 0
+
+pub struct ELF32SectHeaderEnt { //Can be omitted for ET_EXEC
+	pub sh_name: u32, //Section Header symbol table offset
+	pub sh_type: u32,
+	pub sh_flags: u32,
+	pub sh_vaddr: u32,
+	pub sh_offset: u32,
+	pub sh_size: u32, //can be 0
+	pub sh_link: u32,
+	pub sh_info: u32, //Extra info about section
+	pub sh_addralign: u32,
+	pub sh_entsize: u32 // Can be 0
 }
 
-#[cfg(target_os="linux")]
+impl FileHeader {
+	pub fn with_defaults(e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>) -> Self {
+		FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi: 0, pad: [0x00; 8], ofile_type: 0x02, machine_isa: 0x03, e_ver: 1, e_dyn_elf, prog_headers }
+	}
+
+	//fn with_defaults(e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>, sect_headers: Vec<ELF32SectHeaderEnt>) -> Self {
+	//	FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi: 0, pad: [0x00; 8], ofile_type: 0x02, machine_isa: 0x03, e_ver: 1, e_dyn_elf, prog_headers, sect_headers }
+	//}
+
+	//fn with_params(abi: u8, machine_isa: u16, e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>, sect_headers: Vec<ELF32SectHeaderEnt>) -> Self {
+	//	FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi, pad: [0x00; 8], ofile_type: 0x02, machine_isa, e_ver: 1, e_dyn_elf, prog_headers, sect_headers }
+	//}
+}
+
+impl ELF32Header {
+	pub fn new(start_off: u32, num_ph: u16) -> Self {
+		ELF32Header { e_start_addr: start_off+ELF32_VADDR_OFFSET, phead_off: 0x34, sheader_off: 0, flags: 0, eh_size: 52,
+			pheadent_size: 32, ph_num: num_ph, shead_size: 40, shead_num: 0, sh_str_ndx: 0
+		}
+	}
+
+	//pub fn new(start_addr: u32, shead_off: u32, num_ph: u16, num_sh: u16, sh_str_idx: u16) -> Self {
+	//	ELF32Header { e_start_addr: start_addr, phead_off: 0x34, sheader_off: shead_off, flags: 0, eh_size: 52,
+	//		pheadent_size: 32, ph_num: num_ph, shead_size: 40, shead_num: num_sh, sh_str_ndx: sh_str_idx
+	//	}
+	//}
+}
+
+impl ELF32ProgHeaderEnt {
+	pub fn new(size: u32) -> Self { //PHDR ONLY
+		ELF32ProgHeaderEnt { pt_type: 0x06, p_off: 0x34,
+			p_vaddr: ELF32_VADDR_OFFSET+0x34, p_paddr: ELF32_VADDR_OFFSET+0x34,
+			p_file_size: size, p_mem_size: size, p_flags: 0x04, p_align: 0x4
+		}
+	}
+
+	pub fn with_params(kind: u32, off: u32, size: u32, align: u32) -> Self {
+		ELF32ProgHeaderEnt { pt_type: kind, p_off: off, p_vaddr:ELF32_VADDR_OFFSET+off, p_paddr: ELF32_VADDR_OFFSET+off, p_file_size: size, p_mem_size: size, p_flags: 0x4, p_align: align }
+	}
+
+	pub fn with_params_flags(kind: u32, off: u32, size: u32, flags: u32, align: u32) -> Self {
+		ELF32ProgHeaderEnt { pt_type: kind, p_off: off, p_vaddr: ELF32_VADDR_OFFSET+off, p_paddr: ELF32_VADDR_OFFSET+off, p_file_size: size, p_mem_size: size, p_flags: flags, p_align: align }
+	}
+}
+
+impl ELF32SectHeaderEnt {
+	pub fn with_params(sh_name: u32, sh_type: u32, sh_offset: u32, sh_size: u32, sh_link: u32, sh_info: u32, sh_addralign: u32, sh_entsize: u32) -> Self {
+		ELF32SectHeaderEnt { sh_name, sh_type, sh_flags: 0, sh_vaddr: sh_offset+ELF32_VADDR_OFFSET, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize }
+	}
+
+	pub fn with_params_flags(sh_name: u32, sh_type: u32, sh_flags: u32, sh_offset: u32, sh_size: u32, sh_link: u32, sh_info: u32, sh_addralign: u32, sh_entsize: u32) -> Self {
+		ELF32SectHeaderEnt { sh_name, sh_type, sh_flags, sh_vaddr: sh_offset+ELF32_VADDR_OFFSET, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize }
+	}
+}
+
 impl Default for ELF32SectHeaderEnt {
 	fn default() -> Self { //For PHDR ONLY
 		ELF32SectHeaderEnt { sh_name: 0, sh_type: 0, sh_flags: 0, sh_vaddr: 0, sh_offset: 0, sh_size: 0,
@@ -363,82 +416,73 @@ impl Default for ELF32SectHeaderEnt {
 	}
 }
 
-#[cfg(target_os="linux")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct ELF32SymTab {
-	st_name: u32,
-	st_value: u32,
-	st_size: u32,
-	st_info: u8,
-	st_other: u8,
-	st_shndx: u16
-}
-
-//#[cfg(and(target_os="windows", any(target_arch="amd64", target_arch="x86_64", target_arch="aarch64")))]
-//#[cfg(target_os="windows")]
-//#[repr(C)]
-//pub struct IMAGE_OPTIONAL_HEADER64 {
-
-//    pub Magic: u16,
-//    pub MajorLinkerVersion: u8,
-//    pub MinorLinkerVersion: u8,
-//    pub SizeOfCode: u32,
-//    pub SizeOfInitializedData: u32,
-//    pub SizeOfUninitializedData: u32,
-//    pub AddressOfEntryPoint: u32,
-//    pub BaseOfCode: u32,
-//    pub ImageBase: u64,
-//    pub SectionAlignment: u32,
-//    pub FileAlignment: u32,
-//    pub MajorOperatingSystemVersion: u16,
-//    pub MinorOperatingSystemVersion: u16,
-//    pub MajorImageVersion: u16,
-//    pub MinorImageVersion: u16,
-//    pub MajorSubsystemVersion: u16,
-//    pub MinorSubsystemVersion: u16,
-//    pub Win32VersionValue: u32,
-//    pub SizeOfImage: u32,
-//    pub SizeOfHeaders: u32,
-//    pub CheckSum: u32,
-//    pub Subsystem: u16,
-//    pub DllCharacteristics: u16,
-//    pub SizeOfStackReserve: u64,
-//    pub SizeOfStackCommit: u64,
-//    pub SizeOfHeapReserve: u64,
-//    pub SizeOfHeapCommit: u64,
-//    pub LoaderFlags: u32,
-//    pub NumberOfRvaAndSizes: u32,
-//    pub DataDirectory: [IMAGE_DATA_DIRECTORY; 16],
-//}
-
-#[cfg(target_os="windows")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct ImageDataDirectory {
-    pub virtual_address: u32,
-    pub size: u32,
-}
-
-#[cfg(target_os="windows")]
-impl ToBytes for ImageDataDirectory {
-	fn bufferize(&self) -> Vec<u8> {
-		let mut buf: Vec<u8> = self.virtual_address.to_le_bytes().to_vec();
-		buf.extend_from_slice(&self.size.to_le_bytes());
-		buf
+impl Serialize for FileHeader {
+	fn serialize(&self) -> Vec<u8> {
+		let mut ret: Vec<u8> = self.magic.to_vec();
+		ret.push(self.e_class);
+		ret.extend_from_slice(&self.common);
+		ret.push(self.abi);
+		ret.extend_from_slice(&self.pad);
+		ret.extend_from_slice(&self.ofile_type.to_le_bytes());
+		ret.extend_from_slice(&self.machine_isa.to_le_bytes());
+		ret.extend_from_slice(&self.e_ver.to_le_bytes());
+		ret.append(&mut self.e_dyn_elf.serialize());
+		for p_entry in (&self.prog_headers).iter() {
+			ret.append(&mut p_entry.serialize());
+		}
+		//for s_entry in (&self.sect_headers).iter() {
+		//	ret.append(&mut s_entry.serialize());
+		//}
+		ret
 	}
 }
 
-#[cfg(target_os="windows")]
-impl Default for ImageDataDirectory {
-	fn default() -> Self {
-		ImageDataDirectory { virtual_address: 0, size: 0 }
+impl Serialize for ELF32SectHeaderEnt {
+	fn serialize(&self) -> Vec<u8> {
+		let mut ret: Vec<u8> = self.sh_name.to_le_bytes().to_vec();
+		ret.extend_from_slice(&self.sh_type.to_le_bytes());
+		ret.extend_from_slice(&self.sh_flags.to_le_bytes());
+		ret.extend_from_slice(&self.sh_vaddr.to_le_bytes());
+		ret.extend_from_slice(&self.sh_offset.to_le_bytes());
+		ret.extend_from_slice(&self.sh_size.to_le_bytes());
+		ret.extend_from_slice(&self.sh_link.to_le_bytes());
+		ret.extend_from_slice(&self.sh_info.to_le_bytes());
+		ret.extend_from_slice(&self.sh_addralign.to_le_bytes());
+		ret.extend_from_slice(&self.sh_entsize.to_le_bytes());
+		ret
 	}
 }
 
-#[cfg(target_os="windows")]
-impl ImageDataDirectory {
-	pub fn with_parameters(v_addr: u32, sz: u32) -> ImageDataDirectory {
-		ImageDataDirectory { virtual_address: v_addr, size: sz}
+impl Serialize for ELF32ProgHeaderEnt {
+	fn serialize(&self) -> Vec<u8> {
+		let mut ret: Vec<u8> = self.pt_type.to_le_bytes().to_vec();
+		ret.extend_from_slice(&self.p_off.to_le_bytes());
+		ret.extend_from_slice(&self.p_vaddr.to_le_bytes());
+		ret.extend_from_slice(&self.p_paddr.to_le_bytes());
+		ret.extend_from_slice(&self.p_file_size.to_le_bytes());
+		ret.extend_from_slice(&self.p_mem_size.to_le_bytes());
+		ret.extend_from_slice(&self.p_flags.to_le_bytes());
+		ret.extend_from_slice(&self.p_align.to_le_bytes());
+		ret
 	}
 }
+
+impl Serialize for ELF32Header {
+	fn serialize(&self) -> Vec<u8> {
+		let mut ret: Vec<u8> = self.e_start_addr.to_le_bytes().to_vec();
+		ret.extend_from_slice(&self.phead_off.to_le_bytes());
+		ret.extend_from_slice(&self.sheader_off.to_le_bytes());
+		ret.extend_from_slice(&self.flags.to_le_bytes());
+		ret.extend_from_slice(&self.eh_size.to_le_bytes());
+		ret.extend_from_slice(&self.pheadent_size.to_le_bytes());
+		ret.extend_from_slice(&self.ph_num.to_le_bytes());
+		ret.extend_from_slice(&self.shead_size.to_le_bytes());
+		ret.extend_from_slice(&self.shead_num.to_le_bytes());
+		ret.extend_from_slice(&self.sh_str_ndx.to_le_bytes());
+		ret
+	}
+}
+
+}
+
+

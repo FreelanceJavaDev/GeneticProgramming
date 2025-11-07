@@ -1,14 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::{OsString, OsStr};
-use std::fs::File;
-use std::fs::OpenOptions;
-// use std::io::BufRead;
-use std::io::BufReader;
-use std::io::BufWriter;
-// use std::io::Write;
-use std::io::{Error, ErrorKind};
-use std::path::Path;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Error, ErrorKind};
+use std::path::{Path, PathBuf};
 
 const REQ_ARG_NUM: usize = 3;
 #[derive(Eq, PartialEq)]
@@ -32,15 +26,6 @@ pub enum EncodingMethod {
 	M3A1C0XOR, //A=1, C=0, G=1, T=0
 
 }
-// #[repr(usize)]
-// #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-// pub enum BaseValIndex {
-// 	A,
-// 	C,
-// 	G,
-// 	T,
-// 	NumBases,
-// }
 
 /***
  * A main argument parser and validator.
@@ -56,30 +41,6 @@ pub struct ParamsCK {
 	pub flags: u8, // b0: 0= lsb offset shifting, 1= simple fixed bit shift, b1=codons?, b2=in-place(1) or contiguous(0) data/code for codons. b3=codon inside = code(0) or data(1)
 }
 impl ParamsCK {
-    fn new(i_file: File, o_file: File,encode: EncodingMethod, if_ext: InputFileFormat) -> ParamsCK {
-		ParamsCK {
-			reader: Option::Some(BufReader::new(i_file)),
-			writer: Option::Some(BufWriter::new(o_file)),
-			code_fp: None,
-			data_wr: None,
-			compile_encode: encode,
-			ifile_ext: if_ext,
-			flags: 0
-		}
-    }
-
-	fn with_flags_in_place(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8) -> ParamsCK {
-		ParamsCK {
-			reader: Option::Some(BufReader::new(i_file)),
-			writer: Option::Some(BufWriter::new(o_file)),
-			code_fp: None,
-			data_wr: None,
-			compile_encode: encode,
-			ifile_ext: if_ext,
-			flags: cond
-		}
-	}
-
 	fn with_flags_code_only(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8, code_bin: &OsStr) -> ParamsCK {
 		ParamsCK {
 			reader: Option::Some(BufReader::new(i_file)),

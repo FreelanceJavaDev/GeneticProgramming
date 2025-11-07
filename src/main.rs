@@ -9,27 +9,17 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 mod arg_parser;
-pub mod executable_header;
+mod executable_header;
+use executable_header::*;
+#[cfg(target_os="windows")]
+use executable_header::win::*;
 use arg_parser::*;
 
-use crate::executable_header::FILE_ALIGNMENT;
-use crate::executable_header::HeaderPE;
-use crate::executable_header::ImageDataDirectory;
-use crate::executable_header::ImageNTHeaders32;
-use crate::executable_header::ImageSectionHeaderEnt;
-use crate::executable_header::InitFileHeader;
-use crate::executable_header::OptionalImageFileHeader32;
-use crate::executable_header::SECTION_ALIGNMENT;
-use crate::executable_header::ToBytes;
-/*
-enum bp_map_default{ // Y = (X & 0x06) >> 1
-    A=0b00, // 'A'=01000|00|1
-    C=0b01, // 'C'=01000|01|1
-    T=0b10, // 'T'=01010|10|0
-    G=0b11, // 'G'=01000|11|1
-} */
+#[cfg(target_os="linux")]
+use crate::executable_header::linux::*;
+
 // #[cfg(target_os ="windows")]
 // const EOL: String = "\r\n";
 // #[cfg(not(target_os = "windows"))]
@@ -126,10 +116,6 @@ impl CodonOnly {
 	}
 }
 
-
-/***
- *
- */
 pub struct Params {
     reader: BufReader<File>,
     writer: BufWriter<File>,
@@ -213,6 +199,7 @@ fn gen_codon_map_raw(bp_tri: &str, bp_val: u8) -> (u8, u8) {
     };
     (bp_val, codon)
 }
+
 fn generate_codon_map(bp_table: &mut [u8; 256]) -> HashMap<u8, u8> {
     const BP_MAP: [usize; 4] = ['A' as usize, 'C' as usize, 'G' as usize, 'T' as usize];
     const BP_MAP_STR: [u8; 4] = [b'A', b'C', b'G', b'T'];
@@ -516,10 +503,10 @@ fn ms_bit_first_main(mut params: &mut Params, &mut table: &mut [u8; 256]) -> std
         total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
         buff_2bit_size = 0;
     }
-    let align = total_bytes_written % (size_of::<usize>() as u64); //align to system default word bit size. Expect 64 most of the time
+    let align = total_bytes_written % 4; //align to 32-bit words
     if align != 0 {
         for i in 0..align as usize {
-            buff_2bit[i] = NOOP_CODE;
+            buff_2bit[i] = CODE_PADDING;
             buff_2bit_size += 1;
         }
         total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
@@ -575,10 +562,10 @@ fn ls_bit_first_main(mut params: &mut Params, &mut table: &mut [u8; 256]) -> std
         total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
         buff_2bit_size = 0;
     }
-    let align = total_bytes_written % (size_of::<usize>() as u64); //align to system default word bit size. Expect 64 most of the time
+    let align = total_bytes_written % 4; //align to 32-bit word size
     if align != 0 {
         for i in 0..align as usize {
-            buff_2bit[i] = NOOP_CODE;
+            buff_2bit[i] = CODE_PADDING;
             buff_2bit_size += 1;
         }
         total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
@@ -588,63 +575,84 @@ fn ls_bit_first_main(mut params: &mut Params, &mut table: &mut [u8; 256]) -> std
     Ok(())
 }
 
-const fn get_header_size(num_sections: usize) -> usize {
-	use std::mem::size_of;
-	size_of::<InitFileHeader>() + size_of::<ImageNTHeaders32>() + (size_of::<ImageSectionHeaderEnt>() * num_sections)
+
+
+#[cfg(target_os="windows")]
+fn calc_alignment(len: u32, align_val: u32) -> u32 {
+	(match len % align_val {
+		0 => len/align_val,
+		_ => (len/align_val) + 1,
+	})*align_val
+}
+
+#[cfg(target_os="windows")]
+fn generate_win_executable(sec_sizes: Vec<u32>, num_sections: u16) {
+	let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
+	let header_data_len: u32 = win::get_header_size(num_sections as usize) as u32;
+	let sec_file_align: u32 = calc_alignment(header_data_len, FILE_ALIGNMENT);
+	let sec_va_offset: u32 = calc_alignment(header_data_len,SECTION_ALIGNMENT);
+
+	//let va_data_addr_offset: u32 = va_header_offset + calc_alignment(m32_code_size, SECTION_ALIGNMENT);
+
+}
+
+#[cfg(target_os="windows")]
+fn generate_win_executable_code_only(code_len: u32) -> HeaderPE {
+	let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
+	let header_data_len: u32 = win::get_header_size(1) as u32;
+	let header_file_align: u32 = calc_alignment(header_data_len, FILE_ALIGNMENT);
+	let sec_file_align: u32 = calc_alignment(code_len, FILE_ALIGNMENT);
+	let header_va_offset: u32 = calc_alignment(header_data_len,SECTION_ALIGNMENT);
+	let va_data_addr_offset: u32 = header_va_offset + calc_alignment(code_len, SECTION_ALIGNMENT);
+	let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_only(sec_file_align, header_va_offset, header_va_offset, va_data_addr_offset, data_dir_list);
+	let nt_header_32: ImageNTHeaders32 = ImageNTHeaders32::with_defaults(1, opt_file_header);
+	HeaderPE {
+		init_header: InitFileHeader::default(), nt_header: nt_header_32,
+		section_header: vec![
+			ImageSectionHeaderEnt::with_perms(*b".text\0\0\0", code_len, header_va_offset, sec_file_align, header_file_align, 0x60000020)
+			]
+	}
+
+}
+#[cfg(target_os="linux")]
+fn generate_elf_executable_code_only(code_len: u32) -> FileHeader {
+	let phead_size: usize = linux::get_header_size(2, 0);
+	let p_head_list: Vec<ELF32ProgHeaderEnt> = vec![ELF32ProgHeaderEnt::new(phead_size as u32), ELF32ProgHeaderEnt::with_params_flags(1, 0x1000, code_len, 0x05, 0x1000)];
+	//let sec_head_list: Vec<ELF32SectHeaderEnt> = vec![ELF32SectHeaderEnt::default(), ELF32SectHeaderEnt::with_params_flags(1, 1, 0x06, 0x1000, code_len, 0, 0, 16, 0)];
+	FileHeader::with_defaults(ELF32Header::new(0x1000,2), p_head_list)
+
+
 }
 
 fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
+	const ALIGN_FILE: usize = FILE_ALIGNMENT as usize;
 	let code_size: u64 = params.code_fd.metadata()?.len();
 	let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
 	temp_reader.rewind()?;
 	let m32_code_size = code_size as u32;
-	//println!("code size: {code_size} == {m32_code_size}");
-	let header_data_len: u32 = get_header_size(1) as u32;
-	let header_align: u32 = (match header_data_len % FILE_ALIGNMENT {
-		0 => header_data_len/FILE_ALIGNMENT,
-		_ => (header_data_len/FILE_ALIGNMENT) + 1,
-	}) * FILE_ALIGNMENT;
-	let va_header_offset: u32 = (match header_data_len % SECTION_ALIGNMENT {
-		0 => header_data_len/SECTION_ALIGNMENT,
-		_ => (header_data_len/SECTION_ALIGNMENT) + 1,
-	}) * SECTION_ALIGNMENT;
-	let va_data_addr_offset: u32 = va_header_offset + (match m32_code_size % SECTION_ALIGNMENT {
-		0 => m32_code_size/SECTION_ALIGNMENT,
-		_ => (m32_code_size/SECTION_ALIGNMENT) + 1,
-	}) * SECTION_ALIGNMENT;
 
-	let data_dir_list: [ImageDataDirectory; 16] = [
-		ImageDataDirectory::default(), ImageDataDirectory::default(), ImageDataDirectory::default(),
-		ImageDataDirectory::default(), ImageDataDirectory::default(),
-		/*ImageDataDirectory::with_parameters(va_reloc_addr_offset, SECTION_ALIGNMENT),*/ ImageDataDirectory::default(), //base addr relocation table
-		ImageDataDirectory::default(),
-		ImageDataDirectory::default(), //Architecture Specific Directory
-		ImageDataDirectory::default(), //X86 specific field
-		ImageDataDirectory::default(), ImageDataDirectory::default(),
-		ImageDataDirectory::default(), //load configuration directory
-		ImageDataDirectory::default(), ImageDataDirectory::default(), ImageDataDirectory::default(), ImageDataDirectory::default(),
-		];
-	let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_only(m32_code_size, va_header_offset, va_header_offset, va_data_addr_offset, data_dir_list);
-	let nt_header_32: ImageNTHeaders32 = ImageNTHeaders32::with_defaults(1, opt_file_header);
-	let header = HeaderPE { init_header: InitFileHeader::default(), nt_header: nt_header_32, section_header: vec![ImageSectionHeaderEnt::with_perms(*b".text\0\0\0",va_data_addr_offset-va_header_offset, va_header_offset, m32_code_size, va_header_offset, 0x60000020)]};
-	let header_buff = header.bufferize();
+	#[cfg(target_os="windows")]
+	let header = generate_win_executable_code_only(m32_code_size);
+	#[cfg(target_os="linux")]
+	let header = generate_elf_executable_code_only(m32_code_size);
+	let header_buff = header.serialize();
 	let mut bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
-	let buff_align: usize = FILE_ALIGNMENT as usize - (bytes_written % FILE_ALIGNMENT as usize);
-	let mut write_buff: [u8; SECTION_ALIGNMENT as usize] = [0x00; SECTION_ALIGNMENT as usize];
-	if buff_align < FILE_ALIGNMENT as usize {
+	let buff_align: usize = ALIGN_FILE - (bytes_written % ALIGN_FILE);
+	let mut write_buff: [u8; ALIGN_SECTION] = [0x00; ALIGN_SECTION];
+	if buff_align < ALIGN_SECTION {
 		bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
 	}
 	params.writer.flush()?;
-	for full_reads in 0..m32_code_size/SECTION_ALIGNMENT {
+	for _full_reads in 0..m32_code_size/SECTION_ALIGNMENT {
 		temp_reader.read_exact(&mut write_buff)?;
-		bytes_written += buf_writer(&mut params.writer, &write_buff, SECTION_ALIGNMENT as usize)?
+		bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?
 	}
-	let mut end_vec: Vec<u8> = Vec::with_capacity(SECTION_ALIGNMENT as usize);
+	let mut end_vec: Vec<u8> = Vec::with_capacity(ALIGN_SECTION);
 	let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
 	bytes_written += buf_writer(&mut params.writer, &end_vec.as_slice(), end_vec.len())?;
-	if code_data_end % SECTION_ALIGNMENT as usize > 0 {
-		write_buff = [0x00; SECTION_ALIGNMENT as usize];
-		bytes_written += buf_writer(&mut params.writer, &write_buff, SECTION_ALIGNMENT as usize -(code_data_end % SECTION_ALIGNMENT as usize))?;
+	if code_data_end % ALIGN_SECTION > 0 {
+		write_buff = [0x00; ALIGN_SECTION];
+		bytes_written += buf_writer(&mut params.writer, &write_buff, ALIGN_SECTION -(code_data_end % ALIGN_SECTION))?;
 	}
 	params.writer.flush()?;
 
@@ -663,9 +671,7 @@ fn main() -> std::io::Result<()> {
     let mut table: [u8; 256] = [255; 256];
     let main_args: Vec<String> = env::args().collect();
     let (check, temp_path) = parse_main_args(&main_args)?;
-    if !check.check_files() {
-        return Ok(());
-    }
+    if !check.check_files() { return Ok(()); }
 	if !check.is_req_valid() { Error::new(std::io::ErrorKind::InvalidData, "Parameters are invalid!"); }
 
 	let mut params: Params = Params::from(check);

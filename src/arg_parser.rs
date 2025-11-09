@@ -35,7 +35,7 @@ pub struct ParamsCK {
     pub reader: Option<BufReader<File>>,
     pub writer: Option<BufWriter<File>>,
 	pub code_fp: Option<OsString>,
-	pub data_wr: Option<BufWriter<File>>,
+	pub data_fp: Option<OsString>,
 	pub compile_encode: EncodingMethod,
     pub ifile_ext: InputFileFormat,
 	pub flags: u8, // b0: 0= lsb offset shifting, 1= simple fixed bit shift, b1=codons?, b2=in-place(1) or contiguous(0) data/code for codons. b3=codon inside = code(0) or data(1)
@@ -46,19 +46,19 @@ impl ParamsCK {
 			reader: Option::Some(BufReader::new(i_file)),
 			writer: Option::Some(BufWriter::new(o_file)),
 			code_fp: Option::Some(code_bin.to_os_string()),
-			data_wr: None,
+			data_fp: None,
 			compile_encode: encode,
 			ifile_ext: if_ext,
 			flags: cond
 		}
 	}
 
-	fn with_flags_code_and_data(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8, code_bin: &OsStr, data_bin: File) -> ParamsCK {
+	fn with_flags_code_and_data(i_file: File, o_file: File, encode: EncodingMethod, if_ext: InputFileFormat, cond: u8, code_bin: &OsStr, data_bin: &OsStr) -> ParamsCK {
 		ParamsCK {
 			reader: Option::Some(BufReader::new(i_file)),
 			writer: Option::Some(BufWriter::new(o_file)),
 			code_fp: Option::Some(code_bin.to_os_string()),
-			data_wr: Option::Some(BufWriter::new(data_bin)),
+			data_fp: Option::Some(data_bin.to_os_string()),
 			compile_encode: encode,
 			ifile_ext: if_ext,
 			flags: cond
@@ -87,7 +87,7 @@ impl Default for ParamsCK {
             reader: None,
             writer: None,
 			code_fp: None,
-			data_wr: None,
+			data_fp: None,
             compile_encode: EncodingMethod::INVALID,
             ifile_ext: InputFileFormat::Unsupported,
 			flags: 0
@@ -246,11 +246,18 @@ pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<(ParamsCK, Str
         };
 
 		let flags: u8 = check_flags(a_flags,Path::new(&param_map[&(1 as usize)]))?;
-		let mut t_path: PathBuf = PathBuf::from(param_map[&1]);
-		t_path.push("code.bin");
-		let code_fp =  t_path.as_os_str();
-		//let code_file: File = OpenOptions::new().write(true).create(true).read(true).open(t_path.as_path())?;
-        Ok((ParamsCK::with_flags_code_only(in_file, out_file, encoding, in_format, flags, code_fp), ret_str))
+		let mut c_path: PathBuf = PathBuf::from(param_map[&1]);
+		c_path.push("code.bin");
+		let code_fp =  c_path.as_os_str();
+		if flags & 2 == 2 {
+			let mut d_path: PathBuf = PathBuf::from(param_map[&1]);
+			d_path.push("data.bin");
+			let data_fp =  d_path.as_os_str();
+			Ok((ParamsCK::with_flags_code_and_data(in_file, out_file, encoding, in_format, flags, code_fp, data_fp), ret_str))
+		}
+		else {
+        	Ok((ParamsCK::with_flags_code_only(in_file, out_file, encoding, in_format, flags, code_fp), ret_str))
+		}
     }
 	else if arg_list.len() == 2 {
         match arg_list[1].as_str() {

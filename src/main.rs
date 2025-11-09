@@ -37,8 +37,8 @@ pub struct CodonOnly {
 	pub read_frame_used: u8,
 	pub tmp: u8,
 	pub tmp_bits_used: u8,
-	pub codon_buff: u32,
-	pub codon_buff_remain: u8,
+	pub codon_buff: u16,
+	pub codon_buff_used: u16,
 	pub flags: u8,
 	pub inside_codon: bool
 }
@@ -49,7 +49,7 @@ impl CodonOnly {
 			bp_shift: (match encoding {
 		EncodingMethod::M3A0C1 | EncodingMethod::M3A1C0 | EncodingMethod::M3A0C1XOR | EncodingMethod::M3A1C0XOR => 1,
 		_ => 2,
-	}), read_frame: 0, read_frame_used: 0, tmp: 0, tmp_bits_used: 0, codon_buff: 0, codon_buff_remain: 0, flags: b_flags, inside_codon: false }
+	}), read_frame: 0, read_frame_used: 0, tmp: 0, tmp_bits_used: 0, codon_buff: 0, codon_buff_used: 0, flags: b_flags, inside_codon: false }
 	}
 
 	pub fn dyn_init(&mut self) {
@@ -114,12 +114,28 @@ impl CodonOnly {
 		let ck: u8 = self.codon_map[&codon_val];
     	ck == self.start_codon
 	}
+	pub fn reset_tmp_buf(&mut self) {
+		self.tmp = 0;
+		self.tmp_bits_used = 0;
+	}
+
+	pub fn reset_read_frame(&mut self) {
+		self.read_frame = 0;
+		self.read_frame_used = 0;
+	}
+	pub fn update_codon_buf(&mut self) {
+		self.codon_buff += (self.read_frame as u16) << self.codon_buff_used;
+		self.codon_buff_used += self.read_frame_used as u16;
+		self.reset_read_frame();
+	}
+
 }
 
 pub struct Params {
     reader: BufReader<File>,
     writer: BufWriter<File>,
 	code_fd: File,
+	data_fd: Option<File>,
 	ln_read_buf: String,
     compile_encode: EncodingMethod,
     ifile_ext: InputFileFormat,
@@ -127,7 +143,17 @@ pub struct Params {
 }
 impl Params {
     pub fn from(ck: ParamsCK) -> Params {
-        Params {reader: ck.reader.unwrap(), writer: ck.writer.unwrap(), code_fd: OpenOptions::new().write(true).create(true).read(true).open(ck.code_fp.unwrap().as_os_str()).unwrap(), ln_read_buf: String::new(), compile_encode: ck.compile_encode, ifile_ext: ck.ifile_ext, flags: ck.flags }
+		if ck.data_fp.is_none() {
+        	Params {reader: ck.reader.unwrap(), writer: ck.writer.unwrap(),
+				code_fd: OpenOptions::new().write(true).create(true).read(true).open(ck.code_fp.unwrap().as_os_str()).unwrap(),
+				data_fd: None, ln_read_buf: String::new(), compile_encode: ck.compile_encode, ifile_ext: ck.ifile_ext, flags: ck.flags }
+		}
+		else {
+			Params {reader: ck.reader.unwrap(), writer: ck.writer.unwrap(),
+				code_fd: OpenOptions::new().write(true).create(true).read(true).open(ck.code_fp.unwrap().as_os_str()).unwrap(),
+				data_fd: Some(OpenOptions::new().write(true).create(true).read(true).open(ck.data_fp.unwrap().as_os_str()).unwrap()),
+				ln_read_buf: String::new(), compile_encode: ck.compile_encode, ifile_ext: ck.ifile_ext, flags: ck.flags }
+		}
     }
     /**
      * Generates Base Pair value map based on encoding scheme.
@@ -221,7 +247,127 @@ fn generate_codon_map(bp_table: &mut [u8; 256]) -> HashMap<u8, u8> {
 }
 
 fn codon_lsb_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::io::Result<()> {
+	let mut codon_dt = CodonOnly::new(table, params.compile_encode, params.flags);
+	codon_dt.dyn_init();
+	let bit_mask: u8 = match codon_dt.bp_shift {
+		1 => 0b01,
+		2 => 0b11,
+		_ => unreachable!(),
+	};
+	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
+	let codon_bits: u8 = codon_dt.bp_shift*3;
+	let mut data_bw :BufWriter<&File> = if params.data_fd.is_some() {
+		BufWriter::new(params.data_fd.as_ref().unwrap())
+	}
+	else { BufWriter::new(&params.code_fd) };
+	buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
+	let mut other_buf: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+	let mut codon_write_buf: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+    let mut codon_write_buf_size: usize = 0;
+	let mut other_buf_size: usize = 0;
+	let mut total_bytes_written: usize = 0;
 
+	while !params.ln_read_buf.is_empty() {
+		for c in params.ln_read_buf.bytes() {
+			codon_dt.read_frame = codon_dt.bp_map[c as usize] << codon_dt.read_frame_used;
+			codon_dt.read_frame_used += codon_dt.bp_shift;
+			if codon_dt.read_frame_used < codon_bits { continue; }
+			else if !codon_dt.inside_codon {
+				codon_dt.inside_codon = codon_dt.is_start_codon(codon_dt.read_frame);
+				if !codon_dt.inside_codon {
+					codon_dt.tmp += (codon_dt.read_frame & bit_mask) << codon_dt.tmp_bits_used;
+					codon_dt.tmp_bits_used += codon_dt.bp_shift;
+					codon_dt.read_frame >>= codon_dt.bp_shift;
+					codon_dt.read_frame_used -= codon_dt.bp_shift;
+					if codon_dt.tmp_bits_used == TEMP_BUFF_BITS {
+						other_buf[other_buf_size] = codon_dt.tmp;
+						codon_dt.reset_tmp_buf();
+						other_buf_size += 1;
+						if other_buf_size == BUFFER_SIZE {
+							total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+							other_buf_size = 0;
+						}
+					}
+				}
+				else { codon_dt.update_codon_buf(); }
+			}
+			else {
+				codon_dt.inside_codon = codon_dt.is_stop_codon(codon_dt.read_frame);
+				codon_dt.update_codon_buf();
+
+				if codon_dt.codon_buff_used >= 8 {
+					codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+					codon_dt.codon_buff >>= 8;
+					codon_dt.codon_buff_used -= 8;
+					codon_write_buf_size += 1;
+					if codon_write_buf_size == BUFFER_SIZE {
+						total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+						codon_write_buf_size = 0;
+					}
+				}
+			}
+		}
+		params.ln_read_buf.clear();
+		buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
+	}
+	//TODO: write buffers and temp holding variables to appropriate files. Write only full codons to code file.
+	if codon_dt.read_frame_used < codon_bits || !codon_dt.inside_codon {
+		let tmp_remain = TEMP_BUFF_BITS - codon_dt.codon_buff_used as u8;
+		let overflow = tmp_remain < codon_dt.read_frame_used;
+
+		codon_dt.tmp += (codon_dt.read_frame << codon_dt.tmp_bits_used);
+		codon_dt.tmp_bits_used += codon_dt.read_frame_used;
+		other_buf[other_buf_size] = codon_dt.tmp;
+		codon_dt.reset_tmp_buf();
+		other_buf_size += 1;
+		if other_buf_size == BUFFER_SIZE {
+			total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+			other_buf_size = 0;
+		}
+		if overflow {
+			codon_dt.read_frame >>= tmp_remain;
+			codon_dt.read_frame_used -= tmp_remain;
+			codon_dt.tmp += codon_dt.read_frame;
+			codon_dt.tmp_bits_used += codon_dt.read_frame_used;
+		}
+	}
+	else {
+		codon_dt.update_codon_buf();
+	}
+
+	//TODO: check if inside codon or not, handle appropriately.
+	//TODO: check other buffer and tmp var, write to file
+
+
+	if codon_dt.tmp_bits_used > 0 {
+		other_buf[other_buf_size] = codon_dt.tmp;
+		codon_dt.reset_tmp_buf();
+		other_buf_size += 1;
+	}
+	if other_buf_size > 0 {
+		total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+		other_buf_size = 0;
+	}
+	while codon_dt.codon_buff_used >= 8 {
+		codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+		codon_dt.codon_buff >>= 8;
+		codon_dt.codon_buff_used -= 8;
+		codon_write_buf_size += 1;
+		if codon_write_buf_size == BUFFER_SIZE {
+			total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+			codon_write_buf_size = 0;
+		}
+	}
+	if codon_dt.codon_buff_used > 0 {
+		codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+		codon_dt.codon_buff >>= codon_dt.codon_buff_used;
+		codon_dt.codon_buff_used = 0;
+		codon_write_buf_size += 1;
+	}
+	if codon_write_buf_size > 0 {
+		total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+		codon_write_buf_size = 0;
+	}
 	Ok(())
 }
 
@@ -231,6 +377,10 @@ fn codon_msb_simple_left_shift(mut params: &mut Params, mut table: &mut [u8; 256
 	let mut codon_dt = CodonOnly::new(table, params.compile_encode, params.flags);
 	codon_dt.dyn_init();
 	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
+	let mut data_bw = if params.data_fd.is_some() {
+		BufWriter::new((params.data_fd.as_ref().unwrap()))
+	}
+	else { BufWriter::new(&params.code_fd) };
     buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
     let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 	let mut codon_write_buf: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
@@ -587,12 +737,13 @@ fn calc_alignment(len: u32, align_val: u32) -> u32 {
 
 #[cfg(target_os="windows")]
 fn generate_win_executable(sec_sizes: Vec<u32>, num_sections: u16) {
-	let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
 	let header_data_len: u32 = win::get_header_size(num_sections as usize) as u32;
-	let sec_file_align: u32 = calc_alignment(header_data_len, FILE_ALIGNMENT);
-	let sec_va_offset: u32 = calc_alignment(header_data_len,SECTION_ALIGNMENT);
+	let code_file_align: u32 = calc_alignment(header_data_len, FILE_ALIGNMENT);
+	let va_code_offset: u32 = calc_alignment(header_data_len,SECTION_ALIGNMENT);
+	let va_data_addr_offset: u32 = va_code_offset + calc_alignment(sec_sizes[0], SECTION_ALIGNMENT);
+	let data_file_align: u32 = code_file_align + calc_alignment(sec_sizes[0], FILE_ALIGNMENT);
+	let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
 
-	//let va_data_addr_offset: u32 = va_header_offset + calc_alignment(m32_code_size, SECTION_ALIGNMENT);
 
 }
 

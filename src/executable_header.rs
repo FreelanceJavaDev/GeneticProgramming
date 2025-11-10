@@ -136,11 +136,21 @@ pub mod win  {
 			}
 		}
 
+		pub fn with_code_and_data(code_sz: u32, idata_sz: u32, start_addr: u32, code_base: u32, idata_base: u32, image_size: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
+			OptionalImageFileHeader32 { magic: 0x010B, linker_ver: [0x0E, 0x2B], code_size: code_sz, idata_size: idata_sz, uninitialized_data_size: 0,
+				entry_point_addr: start_addr, base_of_code: code_base, base_of_data: idata_base, image_base: 0x00400000,
+				section_align: 0x1000, file_align: 0x200, sys_ver: [0x06,0x00, 0x00,0x00, 0x00,0x00 ,0x00,0x00, 0x06,0x00, 0x00,0x00], w32_version_value: 0,
+				image_size, headers_size: 0x400, ck_sum: 0, subsystem: 3, dll_characteristics: 0x8140, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
+				heap_commit_size: 0x1000, loader_flags: 0, rva_num_and_sizes: 0x10,
+				data_directory: data_dir
+			}
+		}
+
 		pub fn with_params(bit_arch: u16, code_sz: u32, idata_sz: u32, start_addr: u32, code_base: u32, idata_base: u32, image_sz: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
 			OptionalImageFileHeader32 { magic: bit_arch, linker_ver: [0x0E, 0x2B], code_size: code_sz, idata_size: idata_sz, uninitialized_data_size: 0,
 				entry_point_addr: start_addr, base_of_code: code_base, base_of_data: idata_base, image_base: 0x00400000,
 				section_align: 0x1000, file_align: 0x200, sys_ver: [0x06,0x00, 0x00,0x00, 0x00,0x00 ,0x00,0x00, 0x06,0x00, 0x00,0x00], w32_version_value: 0,
-				image_size: image_sz, headers_size: 0x400, ck_sum: 0, subsystem: 0, dll_characteristics: 0x8140, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
+				image_size: image_sz, headers_size: 0x400, ck_sum: 0, subsystem: 3, dll_characteristics: 0x8140, stack_reserve_size: 0x100000, stack_commit_size: 0x1000, heap_reserve_size: 0x100000,
 				heap_commit_size: 0x1000, loader_flags: 0, rva_num_and_sizes: 0x10,
 				data_directory: data_dir
 			}

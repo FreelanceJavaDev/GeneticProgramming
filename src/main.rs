@@ -10,6 +10,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
 use std::path::PathBuf;
+use std::vec;
 mod arg_parser;
 mod executable_header;
 use executable_header::*;
@@ -124,9 +125,9 @@ impl CodonOnly {
 		self.read_frame_used = 0;
 	}
 	pub fn update_codon_buf(&mut self) {
-		self.codon_buff += (self.read_frame as u16) << self.codon_buff_used;
+		let tmp = self.read_frame as u16;
+		self.codon_buff += tmp << self.codon_buff_used;
 		self.codon_buff_used += self.read_frame_used as u16;
-		self.reset_read_frame();
 	}
 
 }
@@ -179,8 +180,6 @@ impl Params {
 }
 
 const BUFFER_SIZE: usize = 1024;
-const NOOP_CODE: u8 = 0x90;
-const INT3_CODE: u8 = 0xCC;
 const CODON_BIT_MASK: u8 = 0b00111111;
 const CODON_BITS_LEN: u8 = 6;
 const TEMP_BUFF_BITS: u8 = u8::BITS as u8;
@@ -269,7 +268,7 @@ fn codon_lsb_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::i
 
 	while !params.ln_read_buf.is_empty() {
 		for c in params.ln_read_buf.bytes() {
-			codon_dt.read_frame = codon_dt.bp_map[c as usize] << codon_dt.read_frame_used;
+			codon_dt.read_frame += (codon_dt.bp_map[c as usize] << codon_dt.read_frame_used);
 			codon_dt.read_frame_used += codon_dt.bp_shift;
 			if codon_dt.read_frame_used < codon_bits { continue; }
 			else if !codon_dt.inside_codon {
@@ -289,11 +288,29 @@ fn codon_lsb_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::i
 						}
 					}
 				}
-				else { codon_dt.update_codon_buf(); }
+				else {
+					codon_dt.codon_buff += (codon_dt.read_frame as u16) << codon_dt.codon_buff_used;
+					codon_dt.codon_buff_used += (codon_dt.read_frame_used as u16);
+					codon_dt.reset_read_frame();
+					if codon_dt.codon_buff_used >= 8 {
+						codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+						codon_dt.codon_buff >>= 8;
+						codon_dt.codon_buff_used -= 8;
+						codon_write_buf_size += 1;
+						if codon_write_buf_size == BUFFER_SIZE {
+							total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+							codon_write_buf_size = 0;
+						}
+					}
+					//codon_dt.update_codon_buf();
+				}
 			}
 			else {
-				codon_dt.inside_codon = codon_dt.is_stop_codon(codon_dt.read_frame);
-				codon_dt.update_codon_buf();
+				codon_dt.inside_codon = !codon_dt.is_stop_codon(codon_dt.read_frame);
+				codon_dt.codon_buff += (codon_dt.read_frame as u16) << codon_dt.codon_buff_used;
+				codon_dt.codon_buff_used += (codon_dt.read_frame_used as u16);
+				codon_dt.reset_read_frame();
+				//codon_dt.update_codon_buf();
 
 				if codon_dt.codon_buff_used >= 8 {
 					codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
@@ -312,11 +329,11 @@ fn codon_lsb_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::i
 	}
 	//TODO: write buffers and temp holding variables to appropriate files. Write only full codons to code file.
 	if codon_dt.read_frame_used < codon_bits || !codon_dt.inside_codon {
-		let tmp_remain = TEMP_BUFF_BITS - codon_dt.codon_buff_used as u8;
+		let tmp_remain = TEMP_BUFF_BITS - codon_dt.read_frame;
 		let overflow = tmp_remain < codon_dt.read_frame_used;
 
-		codon_dt.tmp += (codon_dt.read_frame << codon_dt.tmp_bits_used);
-		codon_dt.tmp_bits_used += codon_dt.read_frame_used;
+		codon_dt.tmp += codon_dt.read_frame << codon_dt.tmp_bits_used;
+		codon_dt.tmp_bits_used += tmp_remain;
 		other_buf[other_buf_size] = codon_dt.tmp;
 		codon_dt.reset_tmp_buf();
 		other_buf_size += 1;
@@ -330,9 +347,12 @@ fn codon_lsb_shift(mut params: &mut Params, mut table: &mut [u8; 256]) -> std::i
 			codon_dt.tmp += codon_dt.read_frame;
 			codon_dt.tmp_bits_used += codon_dt.read_frame_used;
 		}
+		codon_dt.reset_read_frame();
 	}
 	else {
-		codon_dt.update_codon_buf();
+		codon_dt.codon_buff += (codon_dt.read_frame as u16) << codon_dt.codon_buff_used;
+		codon_dt.codon_buff_used += (codon_dt.read_frame_used as u16);
+		codon_dt.reset_read_frame();
 	}
 
 	//TODO: check if inside codon or not, handle appropriately.
@@ -493,7 +513,7 @@ fn codon_msb_simple_left_shift(mut params: &mut Params, mut table: &mut [u8; 256
     }
     if !codon_dt.inside_codon {
 
-       (buff_2bit_temp, temp_bits_used, read_frame,read_frame_used) = eof_8_mod_6(buff_2bit_temp, temp_bits_used, read_frame, read_frame_used);
+    //   (buff_2bit_temp, temp_bits_used, read_frame,read_frame_used) = eof_8_mod_6(buff_2bit_temp, temp_bits_used, read_frame, read_frame_used);
 
         if temp_bits_used == TEMP_BUFF_BITS {
             buff_2bit[buff_2bit_size] = buff_2bit_temp;
@@ -514,9 +534,9 @@ fn codon_msb_simple_left_shift(mut params: &mut Params, mut table: &mut [u8; 256
         //total_bytes_written += buf_writer_align(&mut params.writer, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')? as u64;
     }
     else {
-        let align_fill: u8 = if  read_frame_used == 6 && codon_dt.is_stop_codon(read_frame) { read_frame } else { INT3_CODE };
+        let align_fill: u8 = if  read_frame_used == 6 && codon_dt.is_stop_codon(read_frame) { read_frame } else { CODE_PADDING };
 
-        if align_fill != INT3_CODE {
+        if align_fill != CODE_PADDING {
             if codon_buff_remain >= read_frame_used {
                 codon_buff <<= read_frame_used;
                 codon_buff += read_frame as u64;
@@ -573,7 +593,7 @@ fn codon_msb_simple_left_shift(mut params: &mut Params, mut table: &mut [u8; 256
         read_frame_used = 0;
         read_frame = 0;
         for a in 0..align {
-            codon_write_buf[codon_write_buf_size+a] = INT3_CODE;
+            codon_write_buf[codon_write_buf_size+a] = CODE_PADDING;
         }
         codon_write_buf_size += align;
         //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
@@ -736,13 +756,43 @@ fn calc_alignment(len: u32, align_val: u32) -> u32 {
 }
 
 #[cfg(target_os="windows")]
-fn generate_win_executable(sec_sizes: Vec<u32>, num_sections: u16) {
-	let header_data_len: u32 = win::get_header_size(num_sections as usize) as u32;
-	let code_file_align: u32 = calc_alignment(header_data_len, FILE_ALIGNMENT);
-	let va_code_offset: u32 = calc_alignment(header_data_len,SECTION_ALIGNMENT);
-	let va_data_addr_offset: u32 = va_code_offset + calc_alignment(sec_sizes[0], SECTION_ALIGNMENT);
-	let data_file_align: u32 = code_file_align + calc_alignment(sec_sizes[0], FILE_ALIGNMENT);
+fn gen_sect_ent_data(sec_sizes: Vec<u32>, num_sections: u16) {
+	let mut sec_data: Vec<u32> = Vec::with_capacity((num_sections as usize+1)*3);
+	sec_data.push(win::get_header_size(num_sections as usize) as u32); //header data size in bytes
+	sec_data.push(calc_alignment(sec_data[0], FILE_ALIGNMENT)); //Header size aligned to file alignment
+	sec_data.push(0); //va address section offset
+
+	for i in 1..(sec_sizes.len()+1) {
+		sec_data.push(sec_sizes[i-1]);
+		sec_data.push(calc_alignment(sec_data[i*3], FILE_ALIGNMENT));
+		sec_data.push(sec_data[(i-1)+2] + calc_alignment(sec_data[i*3], SECTION_ALIGNMENT));
+	}
+}
+
+#[cfg(target_os="windows")]
+fn generate_win_executable_header(sec_sizes: Vec<u32>, num_sections: u16) -> HeaderPE {
+	//let code_len = sec_sizes[0];
+	if num_sections == 1 {
+		return generate_win_executable_code_only(sec_sizes[0]);
+	}
 	let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
+
+	let header_data_len: u32 = win::get_header_size(num_sections as usize) as u32;
+
+	let header_file_align: u32 = calc_alignment(header_data_len, FILE_ALIGNMENT);
+	let va_code_offset: u32 = calc_alignment(header_data_len,SECTION_ALIGNMENT);
+	let code_size_align: u32 = calc_alignment(sec_sizes[0], FILE_ALIGNMENT);
+	let data_size_align: u32 = calc_alignment(sec_sizes[1], FILE_ALIGNMENT);
+	let va_data_offset: u32 = va_code_offset + calc_alignment(sec_sizes[0], SECTION_ALIGNMENT);
+	let code_file_align: u32 = header_file_align + calc_alignment(sec_sizes[0], FILE_ALIGNMENT);
+	let img_sz: u32 = va_data_offset + calc_alignment(sec_sizes[1],SECTION_ALIGNMENT);
+
+	let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_and_data(code_size_align, data_size_align, va_code_offset, va_code_offset, va_data_offset, img_sz, data_dir_list);
+	let sect_header_list: Vec<ImageSectionHeaderEnt> = vec![
+		ImageSectionHeaderEnt::with_perms(*b".text\0\0\0", sec_sizes[0], va_code_offset, code_size_align, header_file_align, 0x60000020),
+		ImageSectionHeaderEnt::with_perms(*b".data\0\0\0", sec_sizes[1], va_data_offset, data_size_align, code_file_align, 0xC0000040)
+	];
+	HeaderPE::with_defaults(num_sections, opt_file_header, sect_header_list)
 
 
 }
@@ -765,6 +815,7 @@ fn generate_win_executable_code_only(code_len: u32) -> HeaderPE {
 	}
 
 }
+
 #[cfg(target_os="linux")]
 fn generate_elf_executable_code_only(code_len: u32) -> FileHeader {
 	let phead_size: usize = linux::get_header_size(2, 0);
@@ -777,35 +828,58 @@ fn generate_elf_executable_code_only(code_len: u32) -> FileHeader {
 
 fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
 	const ALIGN_FILE: usize = FILE_ALIGNMENT as usize;
+	let mut f_sizes: Vec<u32> = Vec::new();
 	let code_size: u64 = params.code_fd.metadata()?.len();
 	let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
 	temp_reader.rewind()?;
-	let m32_code_size = code_size as u32;
+	f_sizes.push(code_size as u32);
+	let f_data_valid = params.flags >= 2 && params.data_fd.is_some();
+	if f_data_valid {
+		f_sizes.push(params.data_fd.as_ref().unwrap().metadata()?.len() as u32);
+	}
 
 	#[cfg(target_os="windows")]
-	let header = generate_win_executable_code_only(m32_code_size);
+	let header = generate_win_executable_header(f_sizes.clone(), f_sizes.len() as u16);
 	#[cfg(target_os="linux")]
-	let header = generate_elf_executable_code_only(m32_code_size);
+	let header = generate_elf_executable_code_only(f_sizes[0]);
 	let header_buff = header.serialize();
 	let mut bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
 	let buff_align: usize = ALIGN_FILE - (bytes_written % ALIGN_FILE);
-	let mut write_buff: [u8; ALIGN_SECTION] = [0x00; ALIGN_SECTION];
-	if buff_align < ALIGN_SECTION {
+	let mut write_buff: [u8; ALIGN_SECTION] = [HEADER_PADDING_BYTE; ALIGN_SECTION];
+	if buff_align < ALIGN_FILE {
 		bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
 	}
 	params.writer.flush()?;
-	for _full_reads in 0..m32_code_size/SECTION_ALIGNMENT {
-		temp_reader.read_exact(&mut write_buff)?;
-		bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?
+	for _full_reads in 0..f_sizes[0]/SECTION_ALIGNMENT {
+		temp_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("code.bin file reader error: {}", e); });
+		bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
 	}
 	let mut end_vec: Vec<u8> = Vec::with_capacity(ALIGN_SECTION);
 	let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
 	bytes_written += buf_writer(&mut params.writer, &end_vec.as_slice(), end_vec.len())?;
 	if code_data_end % ALIGN_SECTION > 0 {
-		write_buff = [0x00; ALIGN_SECTION];
+		write_buff = [CODE_PADDING; ALIGN_SECTION];
 		bytes_written += buf_writer(&mut params.writer, &write_buff, ALIGN_SECTION -(code_data_end % ALIGN_SECTION))?;
 	}
 	params.writer.flush()?;
+	if f_data_valid {
+		let mut data_reader: BufReader<&File> = BufReader::new(params.data_fd.as_mut().unwrap());
+		data_reader.rewind()?;
+		write_buff = [CODE_PADDING; ALIGN_SECTION];
+		for _full_buf in 0..f_sizes[1]/SECTION_ALIGNMENT {
+			data_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("data.bin file reader error: {}", e); });
+			bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+		}
+		let mut end_vec: Vec<u8> = Vec::with_capacity(ALIGN_SECTION);
+		let data_end = data_reader.read_to_end(&mut end_vec)?;
+		bytes_written += buf_writer(&mut params.writer, &end_vec.as_slice(), end_vec.len())?;
+		if data_end % ALIGN_SECTION > 0 {
+			write_buff = [CODE_PADDING; ALIGN_SECTION];
+			bytes_written += buf_writer(&mut params.writer, &write_buff, ALIGN_SECTION -(data_end % ALIGN_SECTION))?;
+		}
+		params.writer.flush()?;
+	}
+
 
 	Ok(())
 }
@@ -836,122 +910,23 @@ fn main() -> std::io::Result<()> {
     table[BP_MAP[6]] = bp_map_val[3];
     table[BP_MAP[7]] = bp_map_val[3];
 	match params.flags {
-		0 => ls_bit_first_main(&mut params, &mut table)?,
-		1 => ms_bit_first_main(&mut params, &mut table)?,
+		0b0 => ls_bit_first_main(&mut params, &mut table)?,
+		0b1 => ms_bit_first_main(&mut params, &mut table)?,
+		0b10 => codon_lsb_shift(&mut params, &mut table)?,
 		_ => unreachable!(),
 	}
 	params.code_fd.sync_all()?;
+	if params.flags >= 2 && params.data_fd.is_some() { //codons
+		params.data_fd.as_mut().unwrap().sync_all()?;
+	}
 	generate_executable(&mut params)?;
-	return remove_temp_files(temp_path.as_str(),vec!["code.bin"]);
+	return remove_temp_files(temp_path.as_str(),vec!["code.bin", "data.bin"]);
 
 
 }
 
 #[inline(always)]
 fn method1_ascii_to_2bit_convert(c: u8) -> u8 { (c & 0x06) >> 1 }
-
-fn eof_8_mod_6(mut tmp: u8, mut tmp_bits_used: u8, mut frame: u8, mut frame_bits: u8) -> (u8, u8, u8, u8) {
-    match tmp_bits_used {
-        6 => { tmp = (tmp << 2) + (frame >> 4);
-            tmp_bits_used += 2;
-            frame &= CODON_BIT_MASK >> 2;
-            frame_bits -= 2;
-        },
-        4 => { tmp = (tmp << 4) + (frame >> 2);
-            tmp_bits_used += 4;
-            frame &= CODON_BIT_MASK >> 4;
-            frame_bits -= 4;
-        },
-        2 => { tmp = (tmp << 6) + frame;
-            tmp_bits_used += 6;
-            frame = 0;
-            frame_bits = 0;
-        },
-        0 => { tmp = frame;
-            tmp_bits_used = 6;
-            frame = 0;
-            frame_bits = 0;
-        },
-        _ => unreachable!(), //vals >=8, 7, 5, 3 and 1 are unreachable
-    }
-    (tmp, tmp_bits_used, frame, frame_bits)
-}
-
-// fn buf_writer_eof_out_codon<W: Write>(writer: &mut W, buf: &mut [u8], mut buf_used: usize, mut temp: u8, mut temp_bits: u8, total_bytes: u64) -> std::io::Result<u64>{
-//     let mut last_buff_write: u64 = 0;
-
-//     Ok(last_buff_write)
-// }
-
-// fn buf_writer_eof_in_codon<W: Write>(writer: &mut W, buf: &mut [u8], mut buf_used: usize, mut frame: u8, mut frame_bits: u8, mut codon_word: u64, mut codon_bits_remain: u8) -> std::io::Result<u64>{
-//     let mut last_buff_write: u64 = 0;
-
-//     Ok(last_buff_write)
-// }
-
-fn buf_64_mod_6_align<W: Write>(writer: &mut W, buf: &mut [u8], buff_len: &mut usize, mut frame: u8, mut frame_bits: u8, codon_word: &mut u64, codon_bits_remain: &mut u8) -> std::io::Result<u64>{
-	let mut ret: u64 = 0;
-	let mut len: usize = *buff_len;
-	if *codon_bits_remain >= frame_bits {
-		*codon_word <<= frame_bits;
-		*codon_word += frame as u64;
-		*codon_bits_remain -= frame_bits;
-		frame_bits = 0;
-		frame = 0;
-	}
-	else {
-		*codon_word <<= *codon_bits_remain;
-		*codon_word += (frame >> (frame_bits-*codon_bits_remain)) as u64;
-		let mask: u8 = (!((frame >> (frame_bits-*codon_bits_remain)) << (frame_bits-*codon_bits_remain))) & CODON_BIT_MASK;
-		frame &= mask;
-		frame_bits -= *codon_bits_remain;
-		*codon_bits_remain = 0;
-	}
-	if len+8 > BUFFER_SIZE  {
-		ret = buf_writer(writer, buf, len)? as u64;
-		len = 0;
-	}
-	if *codon_bits_remain == 0 {
-		for off in 7..=0 {
-			buf[len+off] = *codon_word as u8;
-			*codon_word >>= 8;
-		}
-		*codon_word = 0;
-		len += 8;
-		*codon_bits_remain = 64;
-	}
-	if frame_bits > 0 {
-		*codon_word = frame as u64;
-		frame = 0;
-		*codon_bits_remain -= frame_bits;
-		frame_bits = 0;
-	}
-	*buff_len = len;
-	Ok(ret)
-}
-
-fn buf_writer_align<W: Write>(writer: &mut W, buf: &mut [u8], mut buff_len: usize, temp: u8, tmp_len: u8, total_bytes: u64, align_val: u8) -> std::io::Result<u64> {
-	let mut write_align_cnt: u64 = 0;
-	if tmp_len > 0 {
-		if buff_len >= BUFFER_SIZE {
-			write_align_cnt += buf_writer(writer, buf, buff_len)? as u64;
-			buff_len = 0;
-		}
-		buf[buff_len] = temp;
-		buff_len += 1;
-	}
-	// let align = (total_bytes + write_align_cnt + buff_len as u64) % (size_of::<usize>() as u64);
-	// if (align + buff_len as u64) > (BUFFER_SIZE as u64) {
-	// 	write_align_cnt += buf_writer(writer, buf, buff_len)? as u64;
-	// 	buff_len = 0;
-	// }
-	// for _ in 0..align {
-	// 	buf[buff_len] = align_val;//data gets \0 char, code gets NO OP
-	// 	buff_len += 1;
-	// }
-	write_align_cnt += buf_writer(writer, buf, buff_len)? as u64;
-	Ok(write_align_cnt)
-}
 
 fn buf_writer<W: Write>(writer: &mut W, buf: &[u8], buff_len: usize) -> std::io::Result<usize> {
 	let mut written_bytes: usize = 0;
@@ -977,6 +952,5 @@ fn buf_line_reader<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Res
 			len -= 1;
 		}
 	}
-
 	Ok(len)
 }

@@ -160,7 +160,7 @@ fn check_flags(flag_list: Vec<&str>, dir_path: &Path) -> std::io::Result<u8> {
 
 	match ret {
 		0b0100|0b1000|0b1100|0b0101|0b1001|0b1101 => { return Err(Error::new(ErrorKind::InvalidData, "In-place and codon data options are only valid with use-codons")); },
-		0b0110|0b1010|0b1110|0b0111|0b1011|0b1111 => { return Err(Error::new(ErrorKind::Unsupported, "Alternate Codon paths are currently unimplemented.")); },
+		0b0110|0b1010|0b1110|0b0111|0b1011|0b1111|0b0011=> { return Err(Error::new(ErrorKind::Unsupported, "Alternate Codon paths are currently unimplemented.")); },
 		_ => return Ok(ret),
 	};
 }

@@ -27,6 +27,19 @@ pub enum EncodingMethod {
 
 }
 
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[repr(u8)]
+pub enum BitFlags {
+	NoFlags,
+	CodeSectionPadding = 0b00_001,
+	SimpleLeftShift = 0b00_010,
+	UseCodons = 0b00_100,
+	CodonData = 0b01_000,
+	InPlace = 0b10_000
+}
+
+
 /***
  * A main argument parser and validator.
  * This should never be instantiated directly.
@@ -147,20 +160,23 @@ fn check_flags(flag_list: Vec<&str>, dir_path: &Path) -> std::io::Result<u8> {
         return Err(Error::from(ErrorKind::NotFound));
     }
 	if flag_list.is_empty() { return Ok(0); }
-	let mut ret: u8 = 0;
+	let mut ret: u8 = BitFlags::NoFlags as u8;
 	for flag_str in flag_list {
 		ret |= match flag_str {
-			"-sls"|"--simple-lshift" => 0b0001,
-			"--use-codon"|"-uc3" => 0b0010,
-			"--in-place"|"-inp" => 0b0100,
-			"--codon-data"|"-ctd" => 0b1000,
+			"-p"|"--padding" => BitFlags::CodeSectionPadding as u8,
+			"-sls"|"--simple-lshift" => BitFlags::SimpleLeftShift as u8,
+			"--use-codon"|"-uc3" => BitFlags::UseCodons as u8,
+			"--in-place"|"-inp" => BitFlags::InPlace as u8,
+			"--codon-data"|"-ctd" => BitFlags::CodonData as u8,
 			_ => { return Err(Error::new(ErrorKind::InvalidInput,"Unknown flag provided.")); },
 		};
 	}
 
 	match ret {
-		0b0100|0b1000|0b1100|0b0101|0b1001|0b1101 => { return Err(Error::new(ErrorKind::InvalidData, "In-place and codon data options are only valid with use-codons")); },
-		0b0110|0b1010|0b1110|0b0111|0b1011|0b1111|0b0011=> { return Err(Error::new(ErrorKind::Unsupported, "Alternate Codon paths are currently unimplemented.")); },
+		0b01000|0b10000|0b11000|0b01010|0b10010|0b11010 => { return Err(Error::new(ErrorKind::InvalidData, "In-place and codon data options are only valid with use-codons")); },
+		0b01001|0b10001|0b11001|0b01011|0b10011|0b11011 => { return Err(Error::new(ErrorKind::InvalidData, "In-place and codon data options are only valid with use-codons")); },
+		0b01100|0b10100|0b11100|0b01110|0b10110|0b11110|0b00110=> { return Err(Error::new(ErrorKind::Unsupported, "Alternate Codon paths are currently unimplemented.")); },
+		0b01101|0b10101|0b11101|0b01111|0b10111|0b11111|0b00111=> { return Err(Error::new(ErrorKind::Unsupported, "Alternate Codon paths are currently unimplemented.")); },
 		_ => return Ok(ret),
 	};
 }
@@ -249,7 +265,7 @@ pub fn parse_main_args(arg_list: &Vec<String>) -> std::io::Result<(ParamsCK, Str
 		let mut c_path: PathBuf = PathBuf::from(param_map[&1]);
 		c_path.push("code.bin");
 		let code_fp =  c_path.as_os_str();
-		if flags & 2 == 2 {
+		if (flags & BitFlags::UseCodons as u8) > 0 {
 			let mut d_path: PathBuf = PathBuf::from(param_map[&1]);
 			d_path.push("data.bin");
 			let data_fp =  d_path.as_os_str();

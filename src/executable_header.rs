@@ -19,6 +19,54 @@ pub mod win  {
 		use std::mem::size_of;
 		size_of::<InitFileHeader>() + size_of::<ImageNTHeaders32>() + (size_of::<ImageSectionHeaderEnt>() * num_sections)
 	}
+
+	pub fn calc_alignment(len: u32, align_val: u32) -> u32 {
+		(match len % align_val {
+			0 => len/align_val,
+			_ => (len/align_val) + 1,
+		})*align_val
+	}
+
+	pub fn generate_win_executable_header(sec_sizes: Vec<u32>, num_sections: u16) -> HeaderPE {
+	//let code_len = sec_sizes[0];
+	if num_sections == 1 { return generate_win_executable_code_only(sec_sizes[0]); }
+	else { return generate_win_executable_code_data(sec_sizes); }
+
+}
+
+
+	fn generate_win_executable_code_only(code_len: u32) -> HeaderPE {
+		let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
+		let header_data_len: u32 = get_header_size(1) as u32;
+		let header_file_align: u32 = calc_alignment(header_data_len, super::FILE_ALIGNMENT);
+		let sec_file_align: u32 = calc_alignment(code_len, super::FILE_ALIGNMENT);
+		let header_va_offset: u32 = calc_alignment(header_data_len,super::SECTION_ALIGNMENT);
+		let va_data_addr_offset: u32 = header_va_offset + calc_alignment(code_len, super::SECTION_ALIGNMENT);
+		let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_only(sec_file_align, header_va_offset, header_va_offset, va_data_addr_offset, data_dir_list);
+		HeaderPE::with_defaults(1, opt_file_header, vec![ImageSectionHeaderEnt::with_defaults(*b".text\0\0\0", code_len, header_va_offset, sec_file_align, header_file_align)])
+	}
+
+	fn generate_win_executable_code_data(sec_sizes: Vec<u32>) -> HeaderPE {
+		let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
+
+		let header_data_len: u32 = get_header_size(2) as u32;
+
+		let header_file_align: u32 = calc_alignment(header_data_len, super::FILE_ALIGNMENT);
+		let va_code_offset: u32 = calc_alignment(header_data_len,super::SECTION_ALIGNMENT);
+		let code_size_align: u32 = calc_alignment(sec_sizes[0], super::FILE_ALIGNMENT);
+		let data_size_align: u32 = calc_alignment(sec_sizes[1], super::FILE_ALIGNMENT);
+		let va_data_offset: u32 = va_code_offset + calc_alignment(sec_sizes[0], super::SECTION_ALIGNMENT);
+		let code_file_align: u32 = header_file_align + calc_alignment(sec_sizes[0], super::FILE_ALIGNMENT);
+		let img_sz: u32 = va_data_offset + calc_alignment(sec_sizes[1],super::SECTION_ALIGNMENT);
+
+		let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_and_data(code_size_align, data_size_align, va_code_offset, va_code_offset, va_data_offset, img_sz, data_dir_list);
+		let sect_header_list: Vec<ImageSectionHeaderEnt> = vec![
+			ImageSectionHeaderEnt::with_defaults(*b".text\0\0\0", sec_sizes[0], va_code_offset, code_size_align, header_file_align),
+			ImageSectionHeaderEnt::with_perms(*b".data\0\0\0", sec_sizes[1], va_data_offset, data_size_align, code_file_align, 0xC0000040)
+		];
+		HeaderPE::with_defaults(2, opt_file_header, sect_header_list)
+}
+
 	#[derive(Clone)]
 	#[repr(C)]
 	pub struct HeaderPE {
@@ -93,7 +141,7 @@ pub mod win  {
 		pub size_raw_data: u32, // size of raw data aligned to file
 		pub ptr_raw_data: u32, // physical address (aligned to file)
 		pub legacy: [u8; 12], // ptr_relocs, ptr_line_nums, num_relocs and num_line_nums are always 0
-		pub characteristics: u32 //default is: 40000040  (read only, contains initialized data)
+		pub characteristics: u32 //default is: 60000020  (code section: read & execute)
 	} //size is 0x28
 
 	#[derive(Copy, Clone)]
@@ -120,6 +168,7 @@ pub mod win  {
 		pub fn with_defaults(sec_num: u16) ->  ImageFileHeader {
 			ImageFileHeader { machine: 0x014c, num_sections: sec_num, td_stamp: 0, sym_tbl_ptr: 0, num_symbols: 0, opt_header_size: 0x00e0, characteristics: 0x0102 }
 		}
+		#[allow(dead_code)]
 		pub fn with_params(mach: u16, sec_num: u16, opt_head_size: u16, flags: u16) ->  ImageFileHeader {
 			ImageFileHeader { machine: mach, num_sections: sec_num, td_stamp: 0, sym_tbl_ptr: 0, num_symbols: 0, opt_header_size: opt_head_size, characteristics: flags }
 		}
@@ -145,7 +194,7 @@ pub mod win  {
 				data_directory: data_dir
 			}
 		}
-
+		#[allow(dead_code)]
 		pub fn with_params(bit_arch: u16, code_sz: u32, idata_sz: u32, start_addr: u32, code_base: u32, idata_base: u32, image_sz: u32, data_dir: [ImageDataDirectory; 16]) -> OptionalImageFileHeader32 {
 			OptionalImageFileHeader32 { magic: bit_arch, linker_ver: [0x0E, 0x2B], code_size: code_sz, idata_size: idata_sz, uninitialized_data_size: 0,
 				entry_point_addr: start_addr, base_of_code: code_base, base_of_data: idata_base, image_base: 0x00400000,
@@ -160,7 +209,7 @@ pub mod win  {
 	impl ImageSectionHeaderEnt {
 		pub fn with_defaults(s : [u8; 8], size: u32, va: u32, raw_size: u32, ptr_raw: u32) -> ImageSectionHeaderEnt {
 			ImageSectionHeaderEnt { name: s, sec_size: size, virtual_address: va, size_raw_data: raw_size, ptr_raw_data: ptr_raw,
-				legacy: [0x00; 12], characteristics: 0x40000040 }
+				legacy: [0x00; 12], characteristics: 0x60000020 }
 		}
 
 		pub fn with_perms(s : [u8; 8], size: u32, va: u32, raw_size: u32, ptr_raw: u32, perms: u32) -> ImageSectionHeaderEnt {
@@ -170,6 +219,7 @@ pub mod win  {
 	}
 
 	impl ImageDataDirectory {
+		#[allow(dead_code)]
 		pub fn with_params(v_addr: u32, sz: u32) -> ImageDataDirectory {
 			ImageDataDirectory { virtual_address: v_addr, size: sz}
 		}

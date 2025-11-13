@@ -839,37 +839,41 @@ fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
 	let header_buff = header.serialize();
 	let mut bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
 	let buff_align: usize = ALIGN_FILE - (bytes_written % ALIGN_FILE);
-	let mut write_buff: [u8; ALIGN_SECTION] = [HEADER_PADDING_BYTE; ALIGN_SECTION];
+	let mut write_buff: [u8; ALIGN_FILE] = [HEADER_PADDING_BYTE; ALIGN_FILE];
 	if buff_align < ALIGN_FILE {
 		bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
 	}
 	params.writer.flush()?;
-	for _full_reads in 0..f_sizes[0]/SECTION_ALIGNMENT {
+	for _full_reads in 0..f_sizes[0]/FILE_ALIGNMENT {
 		temp_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("code.bin file reader error: {}", e); });
-		bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+		bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
 	}
-	let mut end_vec: Vec<u8> = Vec::with_capacity(ALIGN_SECTION);
+	let mut end_vec: Vec<u8> = Vec::new();
 	let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
-	bytes_written += buf_writer(&mut params.writer, &end_vec.as_slice(), end_vec.len())?;
-	if code_data_end % ALIGN_SECTION > 0 {
-		write_buff = [CODE_PADDING; ALIGN_SECTION];
-		bytes_written += buf_writer(&mut params.writer, &write_buff, ALIGN_SECTION -(code_data_end % ALIGN_SECTION))?;
+	bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+	let align = ALIGN_FILE - (code_data_end % ALIGN_FILE);
+
+	if align > 0 {
+		write_buff = [CODE_PADDING; ALIGN_FILE];
+		bytes_written += buf_writer(&mut params.writer, &write_buff, align)?;
 	}
 	params.writer.flush()?;
 	if f_data_valid {
 		let mut data_reader: BufReader<&File> = BufReader::new(params.data_fd.as_mut().unwrap());
 		data_reader.rewind()?;
-		write_buff = [CODE_PADDING; ALIGN_SECTION];
-		for _full_buf in 0..f_sizes[1]/SECTION_ALIGNMENT {
+		write_buff = [CODE_PADDING; ALIGN_FILE];
+		for _full_buf in 0..f_sizes[1]/FILE_ALIGNMENT {
 			data_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("data.bin file reader error: {}", e); });
-			bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+			bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
 		}
-		let mut end_vec: Vec<u8> = Vec::with_capacity(ALIGN_SECTION);
+		params.writer.flush()?;
+		let mut end_vec: Vec<u8> = Vec::new();
 		let data_end = data_reader.read_to_end(&mut end_vec)?;
-		bytes_written += buf_writer(&mut params.writer, &end_vec.as_slice(), end_vec.len())?;
-		if data_end % ALIGN_SECTION > 0 {
-			write_buff = [CODE_PADDING; ALIGN_SECTION];
-			bytes_written += buf_writer(&mut params.writer, &write_buff, ALIGN_SECTION -(data_end % ALIGN_SECTION))?;
+		bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+		let align_data = ALIGN_FILE - (data_end % ALIGN_FILE);
+		if align_data > 0 {
+			write_buff = [CODE_PADDING; ALIGN_FILE];
+			bytes_written += buf_writer(&mut params.writer, &write_buff, align_data)?;
 		}
 		params.writer.flush()?;
 	}

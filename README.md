@@ -4,6 +4,8 @@
 ## The concept
 This project began as several years ago as a joke about DNA being "God's change log". But the more I thought about it the more DNA felt like a program to me. I soon forgot about it other than as a science fiction plot device. I decided to give it a chance as a way to learn Rust that kept my interest and leverage what I learned at a genetic sequencing company in an entirely different concept.
 
+When I started this project I fully expected that I would get the answer "No DNA doesn't contain computer code" I expected random data. Once I saw actual regions of assembly code that could be recognized by a disassembler coming out as a result I became intrigued to see if different methods of parsing and producing an executable that _could_ theoretically run on a system. The one thing I don't intend to do is inject any code that would alter the resulting executable's behavior. I do use single byte opcodes for section and file alignments.
+
 ## Interesting coincidences and DNA data encoding of digital data
 There are some interesting correlations between DNA and binary encoding systems.
 While binary is a base 2 system consisting of 0 and 1. DNA can be considered a base 4 system consisting of A, T, C and G. It only takes 2 bits to represent each nucleotide uniquely as 00 (0), 01 (1), 10(2) and 11 (3).
@@ -13,6 +15,8 @@ There are several categories for DNA. Broadly speaking there is encoding DNA and
 Non-encoding DNA is the DNA before a start codon and after a stop codon.
 
 Now for the correlations to computers. Using the 2-bit nucleotide mapping a codon would occupy 6 bits, meaning a codon can reside within a byte with two bits (one nucleotide to spare). The number of codons is  is even nicer 4^3^ comes out to 64.
+
+It doesn't end there, just as there is overlap in dna encoding of amino acids, so too is there overlap in computer machine op-codes. On x86 0x60-0x6F are copies of the conditional jumps typically 0x70-0x7F, 0xF0 and 0xF1 both act as a lock prefix.
 
 ## Compilation methods
 All the methods center around converting a base-4 code (A, T, C & G) into a base 2 code (0 & 1). They all involve using two bits for each base.
@@ -32,7 +36,7 @@ Method 2. The Biological base pair complement map
         M2A2C3: A => 10, C => 11, G => 00 and T => 01
         M2A3C2: A => 11, C => 10, G => 01 and T => 00
 
-Method 3. Hydrogen Bond Number (Unimplemented)
+Method 3. Hydrogen Bond Number (Partially implemented)
     This method uses hydrogen bonds between the base pairs as the differentiating factor. A and T have 2 hydrogen bonds whereas C and G have three. This is why analysis of DNA frequently refers to the CG content percentage as a DNA stability metric. It also can be used to map DNA base pairs to a single bit.
 
 Method 4. The ASCII Table dynamic map. (unimplemented)
@@ -47,4 +51,11 @@ Initially the sequence was turned directly into an executable and treated as cod
 
 An initial attempt using codons didn't lead to viable code. A second attempt will be made after the the PE and ELF header formats are implemented so data and code segments can be handled separately then merged.
 
-Currently only the windows PE header file is fully implemented for 32-bit.
+Currently only the windows PE header file is fully implemented and tested for 32-bit.
+
+
+## Future Improvements:
+1. Linux ELF file formats for 32 bit x86 ISA
+2. Linux ELF file formats for ARM 32-bit ISA (for RISC)
+3. After initial raw executable generated validate the executable for problematic/invalid op codes (0x0F is a dangerous single byte opcode on x86, but 0xF0 is a lock prefix)
+4. Parsing codons while handling problematic/invalid opcodes that result from the parsing.

@@ -51,11 +51,9 @@ Initially the sequence was turned directly into an executable and treated as cod
 
 An initial attempt using codons didn't lead to viable code. A second attempt will be made after the the PE and ELF header formats are implemented so data and code segments can be handled separately then merged.
 
-Currently only the windows PE header file is fully implemented and tested for 32-bit.
+Currently the windows PE header file is fully implemented and tested for 32-bit x86, ELF for x86 32-bit and ELF for ARM 32-bit have been implemented.
 
 
 ## Future Improvements:
-1. Linux ELF file formats for 32 bit x86 ISA
-2. Linux ELF file formats for ARM 32-bit ISA (for RISC)
-3. After initial raw executable generated validate the executable for problematic/invalid op codes (0x0F is a dangerous single byte opcode on x86, but 0xF0 is a lock prefix)
-4. Parsing codons while handling problematic/invalid opcodes that result from the parsing.
+1. After initial raw executable generated validate the executable for problematic/invalid op codes (0x0F is a dangerous single byte opcode on x86, but 0xF0 is a lock prefix)
+2. Parsing codons while handling problematic/invalid opcodes that result from the parsing.

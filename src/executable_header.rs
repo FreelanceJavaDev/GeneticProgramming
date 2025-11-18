@@ -4,9 +4,10 @@ pub trait Serialize {
 }
 
 pub const SECTION_ALIGNMENT: u32 = 0x1000;
-pub const ALIGN_SECTION: usize = SECTION_ALIGNMENT as usize;
+#[allow(dead_code)]
 pub const FILE_ALIGNMENT: u32 = 0x200;
 pub const HEADER_PADDING_BYTE: u8 = 0x00;
+pub const WORD_ALIGN_BYTES: u32 = 4; ///32-bit alignment = 4 bytes
 
 #[cfg(target_os="windows")]
 pub const CODE_PADDING: u8 = 0xCC; // INT3 opcode
@@ -27,26 +28,26 @@ pub mod win  {
 		})*align_val
 	}
 
-	pub fn generate_win_executable_header(sec_sizes: Vec<u32>, num_sections: u16) -> HeaderPE {
+	pub fn generate_win_executable_header(sec_sizes: Vec<u32>, num_sections: u16, entry_byte_offset: u32) -> HeaderPE {
 	//let code_len = sec_sizes[0];
-	if num_sections == 1 { return generate_win_executable_code_only(sec_sizes[0]); }
-	else { return generate_win_executable_code_data(sec_sizes); }
+	if num_sections == 1 { return generate_win_executable_code_only(sec_sizes[0], entry_byte_offset); }
+	else { return generate_win_executable_code_data(sec_sizes, entry_byte_offset); }
 
 }
 
 
-	fn generate_win_executable_code_only(code_len: u32) -> HeaderPE {
+	fn generate_win_executable_code_only(code_len: u32, entry_byte_offset: u32) -> HeaderPE {
 		let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
 		let header_data_len: u32 = get_header_size(1) as u32;
 		let header_file_align: u32 = calc_alignment(header_data_len, super::FILE_ALIGNMENT);
 		let sec_file_align: u32 = calc_alignment(code_len, super::FILE_ALIGNMENT);
 		let header_va_offset: u32 = calc_alignment(header_data_len,super::SECTION_ALIGNMENT);
 		let va_data_addr_offset: u32 = header_va_offset + calc_alignment(code_len, super::SECTION_ALIGNMENT);
-		let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_only(sec_file_align, header_va_offset, header_va_offset, va_data_addr_offset, data_dir_list);
+		let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_only(sec_file_align, header_va_offset+entry_byte_offset, header_va_offset, va_data_addr_offset, data_dir_list);
 		HeaderPE::with_defaults(1, opt_file_header, vec![ImageSectionHeaderEnt::with_defaults(*b".text\0\0\0", code_len, header_va_offset, sec_file_align, header_file_align)])
 	}
 
-	fn generate_win_executable_code_data(sec_sizes: Vec<u32>) -> HeaderPE {
+	fn generate_win_executable_code_data(sec_sizes: Vec<u32>, entry_byte_offset: u32) -> HeaderPE {
 		let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
 
 		let header_data_len: u32 = get_header_size(2) as u32;
@@ -59,7 +60,7 @@ pub mod win  {
 		let code_file_align: u32 = header_file_align + calc_alignment(sec_sizes[0], super::FILE_ALIGNMENT);
 		let img_sz: u32 = va_data_offset + calc_alignment(sec_sizes[1],super::SECTION_ALIGNMENT);
 
-		let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_and_data(code_size_align, data_size_align, va_code_offset, va_code_offset, va_data_offset, img_sz, data_dir_list);
+		let opt_file_header: OptionalImageFileHeader32 = OptionalImageFileHeader32::with_code_and_data(code_size_align, data_size_align, va_code_offset+entry_byte_offset, va_code_offset, va_data_offset, img_sz, data_dir_list);
 		let sect_header_list: Vec<ImageSectionHeaderEnt> = vec![
 			ImageSectionHeaderEnt::with_defaults(*b".text\0\0\0", sec_sizes[0], va_code_offset, code_size_align, header_file_align),
 			ImageSectionHeaderEnt::with_perms(*b".data\0\0\0", sec_sizes[1], va_data_offset, data_size_align, code_file_align, 0xC0000040)
@@ -354,16 +355,22 @@ pub mod linux {
 		size_of::<ELF32Header>() + (size_of::<ELF32ProgHeaderEnt>()*num_prog_headers)  + (size_of::<ELF32SectHeaderEnt>() * num_sections) + 24
 	}
 
+	pub fn calc_alignment(len: u32, align_val: u32) -> u32 {
+		(match len % align_val {
+			0 => len/align_val,
+			_ => (len/align_val) + 1,
+		})*align_val
+	}
 #[derive(Clone)]
 #[repr(C)]
 pub struct FileHeader {
 	pub magic: [u8; 4], //Always [0x7F, 0x45, 0x4C, 0x46],
 	pub e_class: u8, //1 = 32-bit, 2 = 64 //EI_CLASS
 	pub common: [u8; 2], // Always [0x01, 0x01], EI_DATA, EI_VERSION
-	pub abi: u8, // Default to 0 (Non-system specific System-V)
+	pub abi: u8, // Default to 0 (Non-system specific System-V), 97=ARM OS ABI, 64=Embedded ARM OS ABI
 	pub pad: [u8; 0x08 ], // 8 byte padding [ 0x00; 0x08],
 	pub ofile_type: u16, //Always 0x02 = ET_EXEC
-	pub machine_isa: u16, // if 32-bit use 0x03 = x86 (Intel 80386) otherwise, get from system
+	pub machine_isa: u16, // if 32-bit use 0x03 = x86 (Intel 80386) otherwise, 0x28 (ARM) get from system
 	pub e_ver: u32, //Always 1,
 	pub e_dyn_elf: ELF32Header,
 	pub prog_headers: Vec<ELF32ProgHeaderEnt>,
@@ -400,37 +407,48 @@ pub struct ELF32ProgHeaderEnt {
 #[derive(Copy, Clone)]
 #[repr(C)]
 
-pub struct ELF32SectHeaderEnt { //Can be omitted for ET_EXEC
+pub struct ELF32SectHeaderEnt {
 	pub sh_name: u32, //Section Header symbol table offset
-	pub sh_type: u32,
-	pub sh_flags: u32,
-	pub sh_vaddr: u32,
-	pub sh_offset: u32,
+	pub sh_type: u32, //Section Header type: 0 (SHT_NULL), 1 (SHT_PROGBITS), 3 (SHT_STRTAB)
+	pub sh_flags: u32, // 0 = none, 1=write, 2 = alloc, 4 =execute
+	pub sh_vaddr: u32, //va_address
+	pub sh_offset: u32, //offset within section
 	pub sh_size: u32, //can be 0
-	pub sh_link: u32,
+	pub sh_link: u32, //can be zero
 	pub sh_info: u32, //Extra info about section
 	pub sh_addralign: u32,
 	pub sh_entsize: u32 // Can be 0
 }
 
 impl FileHeader {
+	#[cfg(not(target_arch = "arm"))]
 	pub fn with_defaults(e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>) -> Self {
 		FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi: 0, pad: [0x00; 8], ofile_type: 0x02, machine_isa: 0x03, e_ver: 1, e_dyn_elf, prog_headers }
 	}
 
-	//fn with_defaults(e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>, sect_headers: Vec<ELF32SectHeaderEnt>) -> Self {
-	//	FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi: 0, pad: [0x00; 8], ofile_type: 0x02, machine_isa: 0x03, e_ver: 1, e_dyn_elf, prog_headers, sect_headers }
-	//}
+	#[cfg(target_arch = "arm")]
+	pub fn with_defaults(e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>) -> Self {
+		FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi: 0x61, pad: [0x00; 8], ofile_type: 0x02, machine_isa: 0x28, e_ver: 1, e_dyn_elf, prog_headers }
+	}
 
-	//fn with_params(abi: u8, machine_isa: u16, e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>, sect_headers: Vec<ELF32SectHeaderEnt>) -> Self {
-	//	FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi, pad: [0x00; 8], ofile_type: 0x02, machine_isa, e_ver: 1, e_dyn_elf, prog_headers, sect_headers }
-	//}
+	#[allow(dead_code)]
+	pub fn with_target_arch_abi(e_dyn_elf: ELF32Header, prog_headers: Vec<ELF32ProgHeaderEnt>, abi: u8, isa: u16) -> Self {
+		FileHeader { magic: [0x7F, 0x45, 0x4C, 0x46], e_class: 1, common: [0x01, 0x01], abi, pad: [0x00; 8], ofile_type: 0x02, machine_isa: isa, e_ver: 1, e_dyn_elf, prog_headers }
+	}
+
 }
 
 impl ELF32Header {
 	pub fn new(start_off: u32, num_ph: u16) -> Self {
 		ELF32Header { e_start_addr: start_off+ELF32_VADDR_OFFSET, phead_off: 0x34, sheader_off: 0, flags: 0, eh_size: 52,
-			pheadent_size: 32, ph_num: num_ph, shead_size: 40, shead_num: 0, sh_str_ndx: 0
+			pheadent_size: 32, ph_num: num_ph, shead_size: 0, shead_num: 0, sh_str_ndx: 0
+		}
+	}
+
+	#[allow(dead_code)]
+	pub fn with_sheader(start_off: u32, sh_off: u32, num_ph: u16, num_sh: u16) -> Self {
+		ELF32Header { e_start_addr: start_off+ELF32_VADDR_OFFSET, phead_off: 0x34, sheader_off: sh_off, flags: 0, eh_size: 52,
+			pheadent_size: 32, ph_num: num_ph, shead_size: 40, shead_num: num_sh, sh_str_ndx: num_sh-1
 		}
 	}
 
@@ -459,13 +477,18 @@ impl ELF32ProgHeaderEnt {
 }
 
 impl ELF32SectHeaderEnt {
-	pub fn with_params(sh_name: u32, sh_type: u32, sh_offset: u32, sh_size: u32, sh_link: u32, sh_info: u32, sh_addralign: u32, sh_entsize: u32) -> Self {
-		ELF32SectHeaderEnt { sh_name, sh_type, sh_flags: 0, sh_vaddr: sh_offset+ELF32_VADDR_OFFSET, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize }
+	pub fn as_shrtrtab(sh_name: u32, sh_addr_base: u32, sh_offset: u32, sh_size: u32) -> Self {
+		ELF32SectHeaderEnt { sh_name, sh_type: 3, sh_flags: 0, sh_vaddr: sh_addr_base, sh_offset, sh_size, sh_link: 0, sh_info: 0, sh_addralign: 1, sh_entsize: 0}
 	}
 
-	pub fn with_params_flags(sh_name: u32, sh_type: u32, sh_flags: u32, sh_offset: u32, sh_size: u32, sh_link: u32, sh_info: u32, sh_addralign: u32, sh_entsize: u32) -> Self {
-		ELF32SectHeaderEnt { sh_name, sh_type, sh_flags, sh_vaddr: sh_offset+ELF32_VADDR_OFFSET, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize }
+	pub fn as_code(sh_name: u32, sh_addr_base: u32, sh_offset: u32, sh_size: u32) -> Self {
+		ELF32SectHeaderEnt { sh_name, sh_type: 1, sh_flags: 6, sh_vaddr: sh_addr_base+ELF32_VADDR_OFFSET, sh_offset, sh_size, sh_link: 0, sh_info: 0, sh_addralign: 16, sh_entsize: 0}
 	}
+
+	pub fn as_data(sh_name: u32, sh_addr_base: u32, sh_offset: u32, sh_size: u32) -> Self {
+		ELF32SectHeaderEnt { sh_name, sh_type: 1, sh_flags: 5, sh_vaddr: sh_addr_base+ELF32_VADDR_OFFSET, sh_offset, sh_size, sh_link: 0, sh_info: 0, sh_addralign: 4, sh_entsize: 0}
+	}
+
 }
 
 impl Default for ELF32SectHeaderEnt {

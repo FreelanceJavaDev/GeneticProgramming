@@ -27,7 +27,13 @@ use crate::executable_header::linux::*;
 // const EOL: String = "\n";
 
 //TODO: bool codon
-
+#[repr(u8)]
+pub enum CodonState {
+	OutRead = 0b00,
+	ToInRd = 0b01,
+	ToOutRd = 0b10,
+	InRead = 0b11
+}
 pub struct CodonOnly {
 	pub codon_map: HashMap<u8, u8>,
 	pub bp_map: [u8; 256],
@@ -127,8 +133,11 @@ impl CodonOnly {
 	pub fn update_codon_buf(&mut self) {
 		self.codon_buff += (self.read_frame as u16) << self.codon_buff_used;
 		self.codon_buff_used += self.read_frame_used as u16;
-		//self.reset_read_frame();
+		self.reset_read_frame();
 	}
+
+	//pub fn flush_tmp(&mut self, )
+
 
 }
 
@@ -187,8 +196,6 @@ impl Params {
 }
 
 const BUFFER_SIZE: usize = 1024;
-const CODON_BIT_MASK: u8 = 0b00111111;
-const CODON_BITS_LEN: u8 = 6;
 const TEMP_BUFF_BITS: u8 = u8::BITS as u8;
 const PADDING_BUFF: [u8; 4] = [CODE_PADDING; 4];
 
@@ -252,6 +259,8 @@ fn generate_codon_map(bp_table: &mut [u8; 256]) -> HashMap<u8, u8> {
     return h_map;
 }
 
+
+
 fn codon_lsb_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()> {
 	let mut codon_dt = CodonOnly::new(table, params.compile_encode, params.flags);
 	codon_dt.dyn_init();
@@ -302,7 +311,6 @@ fn codon_lsb_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()
 				}
 				else {
 					codon_dt.update_codon_buf();
-					codon_dt.reset_read_frame();
 					if codon_dt.codon_buff_used >= 8 {
 						codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
 						codon_dt.codon_buff >>= 8;
@@ -318,7 +326,6 @@ fn codon_lsb_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()
 			else {
 				codon_dt.inside_codon = !codon_dt.is_stop_codon(codon_dt.read_frame);
 				codon_dt.update_codon_buf();
-				codon_dt.reset_read_frame();
 
 				if codon_dt.codon_buff_used >= 8 {
 					codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
@@ -335,30 +342,31 @@ fn codon_lsb_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()
 		params.ln_read_buf.clear();
 		buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
 	}
-	if codon_dt.read_frame_used < codon_bits || !codon_dt.inside_codon {
-		let tmp_remain = TEMP_BUFF_BITS - codon_dt.read_frame;
-		let overflow = tmp_remain < codon_dt.read_frame_used;
+	if codon_dt.read_frame_used > 0 {
+		if codon_dt.read_frame_used < codon_bits || !codon_dt.inside_codon {
+			let tmp_remain = TEMP_BUFF_BITS - codon_dt.tmp_bits_used;
+			let overflow = tmp_remain < codon_dt.read_frame_used;
 
-		codon_dt.tmp += codon_dt.read_frame << codon_dt.tmp_bits_used;
-		codon_dt.tmp_bits_used += tmp_remain;
-		other_buf[other_buf_size] = codon_dt.tmp;
-		codon_dt.reset_tmp_buf();
-		other_buf_size += 1;
-		if other_buf_size == BUFFER_SIZE {
-			_total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
-			other_buf_size = 0;
+			codon_dt.tmp += codon_dt.read_frame << codon_dt.tmp_bits_used;
+			codon_dt.tmp_bits_used += tmp_remain;
+			other_buf[other_buf_size] = codon_dt.tmp;
+			codon_dt.reset_tmp_buf();
+			other_buf_size += 1;
+			if other_buf_size == BUFFER_SIZE {
+				_total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+				other_buf_size = 0;
+			}
+			if overflow {
+				codon_dt.read_frame >>= tmp_remain;
+				codon_dt.read_frame_used -= tmp_remain;
+				codon_dt.tmp += codon_dt.read_frame;
+				codon_dt.tmp_bits_used += codon_dt.read_frame_used;
+			}
+			codon_dt.reset_read_frame();
 		}
-		if overflow {
-			codon_dt.read_frame >>= tmp_remain;
-			codon_dt.read_frame_used -= tmp_remain;
-			codon_dt.tmp += codon_dt.read_frame;
-			codon_dt.tmp_bits_used += codon_dt.read_frame_used;
+		else {
+			codon_dt.update_codon_buf();
 		}
-		codon_dt.reset_read_frame();
-	}
-	else {
-		codon_dt.update_codon_buf();
-		codon_dt.reset_read_frame();
 	}
 
 	if codon_dt.tmp_bits_used > 0 {
@@ -402,251 +410,179 @@ fn codon_lsb_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()
 }
 
 #[allow(dead_code)]
-fn codon_msb_simple_left_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()> {
+fn codon_simple_left_shift(params: &mut Params, table: &[u8; 256]) -> std::io::Result<()> {
     let mut codon_dt = CodonOnly::new(table, params.compile_encode, params.flags);
 	codon_dt.dyn_init();
 	let bit_mask: u8 = match codon_dt.bp_shift {
-		1 => 0b00000_111,
-		2 => 0b00_111111,
+		1 => 0b00000_011,
+		2 => 0b00_001111,
 		_ => unreachable!(),
 	};
 	let add_padding: bool = params.flag_check(BitFlags::CodeSectionPadding);
 	let codon_bits: u8 = codon_dt.bp_shift*3;
+	let bp_lsb_offset: u8 = codon_dt.bp_shift*2;
 	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
 	let mut data_bw = if params.data_fd.is_some() {
 		BufWriter::new(params.data_fd.as_ref().unwrap())
 	}
 	else { BufWriter::new(&params.code_fd) };
     buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
-    let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+    let mut other_buf: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
 	let mut codon_write_buf: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
     let mut codon_write_buf_size: usize = 0;
-	let mut buff_2bit_temp: u8 = 0;
-    let mut buff_2bit_size: usize = 0;
-    let mut read_frame : u8 = 0; // 6bits
-	let mut read_frame_used : u8 = 0;
-	let mut codon_buff: u64 = 0;
-	let mut codon_buff_remain: u8 = 64;
-	let mut temp_bits_used: u8 = 0;
-    let mut _total_bytes_written: u64 = 0;
+	let mut other_buf_size: usize = 0;
+	let mut _total_bytes_written: usize = 0;
+
 	if add_padding && params.read_buf_not_empty() {
 		code_bw.write_all(&PADDING_BUFF)?;
 		_total_bytes_written = 4;
 	}
     while params.read_buf_not_empty() {
         for c in params.ln_read_buf.bytes() {
-			read_frame <<= 2;
-			read_frame += codon_dt.bp_map[c as usize];
-			read_frame_used += 2;
-			if read_frame_used < codon_bits { continue; }
-            if read_frame_used == TEMP_BUFF_BITS {
-                read_frame &= bit_mask;
-                read_frame_used -= 2;
-            }
+			codon_dt.read_frame <<= codon_dt.bp_shift;
+			codon_dt.read_frame += codon_dt.bp_map[c as usize];
+			codon_dt.read_frame_used += codon_dt.bp_shift;
+			if codon_dt.read_frame_used < codon_bits { continue; }
 			if !codon_dt.inside_codon {
-				codon_dt.inside_codon = codon_dt.is_start_codon(read_frame);
+				codon_dt.inside_codon = codon_dt.is_start_codon(codon_dt.read_frame);
 				if !codon_dt.inside_codon {
-					buff_2bit_temp <<= 2;
-					buff_2bit_temp += read_frame >> 4;
-					temp_bits_used += 2;
-					 if temp_bits_used == TEMP_BUFF_BITS {
-						buff_2bit[buff_2bit_size] = buff_2bit_temp;
-						temp_bits_used = 0;
-						buff_2bit_temp = 0;
-						buff_2bit_size += 1;
-						if buff_2bit_size == BUFFER_SIZE {
-							_total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
-							buff_2bit_size = 0;
+					codon_dt.tmp <<= codon_dt.bp_shift;
+					codon_dt.tmp += codon_dt.read_frame >> bp_lsb_offset;
+					codon_dt.tmp_bits_used += codon_dt.bp_shift;
+					codon_dt.read_frame &= bit_mask;
+					codon_dt.read_frame_used -= codon_dt.bp_shift;
+					 if codon_dt.tmp_bits_used == TEMP_BUFF_BITS {
+						other_buf[other_buf_size] = codon_dt.tmp;
+						codon_dt.reset_tmp_buf();
+						other_buf_size += 1;
+						if other_buf_size == BUFFER_SIZE {
+							_total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+							other_buf_size = 0;
 						}
 					}
 				}
 				else {
-					codon_buff = read_frame as u64;
-					read_frame = 0;
-					codon_buff_remain -= 8;
-					read_frame_used = 0;
-					//total_bytes_written += buf_writer_align(&mut code_bw, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')?;
+					codon_dt.update_codon_buf();
+					if codon_dt.codon_buff_used >= 8 {
+						codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+						codon_dt.codon_buff >>= 8;
+						codon_dt.codon_buff_used -= 8;
+						codon_write_buf_size += 1;
+						if codon_write_buf_size == BUFFER_SIZE {
+							_total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+							codon_write_buf_size = 0;
+						}
+					}
 				}
 			}
 			else {
-                // if read_frame_used == TEMP_BUFF_MAX_BITS {
-				// 	read_frame &= CODON_BIT_MASK;
-				// 	read_frame_used -= 2;
-				// }
-                codon_dt.inside_codon = codon_dt.is_stop_codon(read_frame);
-                if codon_dt.inside_codon {
-                    if codon_buff_remain >= read_frame_used {
-                        codon_buff <<= read_frame_used;
-                        codon_buff += read_frame as u64;
-                        codon_buff_remain -= read_frame_used;
-                        read_frame_used = 0;
-                        read_frame = 0;
-                	}
-                    else {
-                        //total_bytes_written += buf_64_mod_6_align(&mut code_bw, &mut codon_write_buf, &mut codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
-                    }
-                }
-                else {
-                    // println!("{:>width$b} ->", codon_buff, width=(64-codon_buff_remain) as usize);
-                    // if codon_buff_remain > 0 {
-                    //     codon_buff <<= codon_buff_remain;
-                    //     // println!("{:b}", codon_buff);
-
-                	// }
-                    if codon_write_buf_size+8 > BUFFER_SIZE  {
-                        //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-                        codon_write_buf_size = 0;
-                    }
-                    for off in 7..=0 {
-                        codon_write_buf[codon_write_buf_size+off] = codon_buff as u8;
-                        codon_buff >>= 8;
-                    }
-                    codon_buff = 0;
-                    codon_buff_remain = 64;
-                    codon_write_buf_size += 8;
-                    let align = if (codon_write_buf_size+1) % 16 != 0 { (codon_write_buf_size+1) % 16 } else { 15 };
-                    if codon_write_buf_size+align > BUFFER_SIZE {
-                        //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-                        codon_write_buf_size = 0;
-                    }
-
-                    codon_write_buf[codon_write_buf_size] = read_frame;
-                    codon_write_buf_size += 1;
-                    read_frame_used = 0;
-                    read_frame = 0;
-                    // for a in 0..align {
-                    //     codon_write_buf[codon_write_buf_size+a] = NOOP_CODE;
-                    // }
-                    // codon_write_buf_size += align;
-                    //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-                    codon_write_buf_size = 0;
-                }
+                codon_dt.inside_codon = !codon_dt.is_stop_codon(codon_dt.read_frame);
+				codon_dt.update_codon_buf();
+				if codon_dt.codon_buff_used >= 8 {
+					codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+					codon_dt.codon_buff >>= 8;
+					codon_dt.codon_buff_used -= 8;
+					codon_write_buf_size += 1;
+					if codon_write_buf_size == BUFFER_SIZE {
+						_total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+						codon_write_buf_size = 0;
+					}
+				}
             }
         }
         params.ln_read_buf.clear();
         buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
     }
-    // if read_frame_used < CODON_BITS_LEN { todo!(); }
-    if read_frame_used == TEMP_BUFF_BITS {
-        read_frame &= CODON_BIT_MASK;
-        read_frame_used -= 2;
-    }
-    if !codon_dt.inside_codon {
+	if codon_dt.read_frame_used > 0 {
+		if codon_dt.read_frame_used < codon_bits || !codon_dt.inside_codon {
+			let tmp_remain = TEMP_BUFF_BITS - codon_dt.tmp_bits_used;
+			let overflow = tmp_remain < codon_dt.read_frame_used;
+			let mut bp_mask: u8 = match codon_dt.bp_shift {
+				1 => match codon_dt.read_frame_used {
+						3 => 0b00000_111,
+						2 => 0b00000_011,
+						1 => 0b00000_001,
+						_ => unreachable!(),
+					},
+				2 => match codon_dt.read_frame_used {
+					6 => 0b00_111111,
+					4 => 0b00_001111,
+					2 => 0b00_000011,
+					_ => unreachable!(),
+				},
+				_ => unreachable!(),
+			};
+			let mut rd_frame: u8 = codon_dt.read_frame;
+			let mut offset = if overflow { tmp_remain } else { codon_dt.read_frame_used};
+			while offset > 0 {
+				rd_frame &= bp_mask;
+				offset -= codon_dt.bp_shift;
+				codon_dt.tmp += (rd_frame >> offset) << codon_dt.tmp_bits_used;
+				codon_dt.tmp_bits_used += codon_dt.bp_shift;
+				bp_mask >>= codon_dt.bp_shift;
 
-    //   (buff_2bit_temp, temp_bits_used, read_frame,read_frame_used) = eof_8_mod_6(buff_2bit_temp, temp_bits_used, read_frame, read_frame_used);
+			}
 
-        if temp_bits_used == TEMP_BUFF_BITS {
-            buff_2bit[buff_2bit_size] = buff_2bit_temp;
-            temp_bits_used = 0;
-            buff_2bit_temp = 0;
-            buff_2bit_size += 1;
-            if read_frame_used > 0 {
-                buff_2bit_temp = read_frame;
-                temp_bits_used = read_frame_used;
-                read_frame = 0;
-                read_frame_used = 0;
-            }
-            if buff_2bit_size == BUFFER_SIZE {
-                //total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
-                buff_2bit_size = 0;
-            }
-        }
-        //total_bytes_written += buf_writer_align(&mut params.writer, &mut buff_2bit, buff_2bit_size, buff_2bit_temp, temp_bits_used, total_bytes_written, b'\0')? as u64;
-    }
-    else {
-        let align_fill: u8 = if  read_frame_used == 6 && codon_dt.is_stop_codon(read_frame) { read_frame } else { CODE_PADDING };
+			other_buf[other_buf_size] = codon_dt.tmp;
+			codon_dt.reset_tmp_buf();
+			other_buf_size += 1;
+			if other_buf_size == BUFFER_SIZE {
+				_total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+				other_buf_size = 0;
+			}
+			if overflow {
+				codon_dt.read_frame >>= tmp_remain;
+				codon_dt.read_frame_used -= tmp_remain;
+				codon_dt.tmp += codon_dt.read_frame;
+				codon_dt.tmp_bits_used += codon_dt.read_frame_used;
+			}
+			codon_dt.reset_read_frame();
+		}
+		else {
+			codon_dt.update_codon_buf();
+			//codon_dt.reset_read_frame();
+		}
+	}
 
-        if align_fill != CODE_PADDING {
-            if codon_buff_remain >= read_frame_used {
-                codon_buff <<= read_frame_used;
-                codon_buff += read_frame as u64;
-                codon_buff_remain -= read_frame_used;
-                read_frame_used = 0;
-                read_frame = 0;
-            }
-            else {
-                //total_bytes_written += buf_64_mod_6_align(&mut params.writer, &mut codon_write_buf, &mut codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
+	if codon_dt.tmp_bits_used > 0 {
+		other_buf[other_buf_size] = codon_dt.tmp;
+		codon_dt.reset_tmp_buf();
+		other_buf_size += 1;
+	}
 
-            }
-            // if codon_buff_remain > 0 {
-            //     codon_buff <<= codon_buff_remain;
-            // }
-            if codon_write_buf_size+8 > BUFFER_SIZE  {
-                //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-                codon_write_buf_size = 0;
-            }
-            for off in 7..=0 {
-                //codon_write_buf[codon_write_buf_size+off] = codon_buff as u8;
-                codon_buff >>= 8;
-            }
-            codon_buff = 0;
-            codon_buff_remain = 64;
-            codon_write_buf_size += 8;
-        }
-        else {
-            // if codon_buff_remain > 0 {
-            //     codon_buff <<= codon_buff_remain;
-            // }
-            if codon_write_buf_size+8 > BUFFER_SIZE  {
-                //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-                codon_write_buf_size = 0;
-            }
-            for off in 7..=0 {
-                codon_write_buf[codon_write_buf_size+off] = codon_buff as u8;
-                codon_buff >>= 8;
-            }
-            codon_buff = 0;
-            codon_buff_remain = 64;
-            codon_write_buf_size += 8;
-            // total_bytes_written += buf_64_mod_6_align(&mut params.writer, &mut codon_write_buf, codon_write_buf_size, read_frame, read_frame_used, &mut codon_buff, &mut codon_buff_remain)?;
-            // codon_write_buf_size = 0;
-        }
+	if other_buf_size > 0 {
+		_total_bytes_written += buf_writer(&mut data_bw, &other_buf, other_buf_size)?;
+		other_buf_size = 0;
+	}
 
-        let align = if (codon_write_buf_size+1) % 16 != 0 { (codon_write_buf_size+1) % 16 } else { 15 } ;
-        if codon_write_buf_size+align > BUFFER_SIZE {
-            //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-            codon_write_buf_size = 0;
-        }
+	while codon_dt.codon_buff_used >= 8 {
+		codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+		codon_dt.codon_buff >>= 8;
+		codon_dt.codon_buff_used -= 8;
+		codon_write_buf_size += 1;
+		if codon_write_buf_size == BUFFER_SIZE {
+			_total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+			codon_write_buf_size = 0;
+		}
+	}
 
-        codon_write_buf[codon_write_buf_size] = align_fill;
-        codon_write_buf_size += 1;
-        read_frame_used = 0;
-        read_frame = 0;
-        for a in 0..align {
-            codon_write_buf[codon_write_buf_size+a] = CODE_PADDING;
-        }
-        codon_write_buf_size += align;
-        //total_bytes_written += buf_writer(&mut params.writer, &mut codon_write_buf, codon_write_buf_size)? as u64;
-        codon_write_buf_size = 0;
-    }
-
-    // if temp_bits_used < 8 {
-    //     buff_2bit[buff_2bit_size] = buff_2bit_temp;
-    //     temp_bits_used = 0;
-    //     buff_2bit_temp = 0;
-    //     buff_2bit_size += 1;
-
-    // }
-    // if buff_2bit_size > 0 {
-    //     total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
-    //     buff_2bit_size = 0;
-    // }
-    // let align = total_bytes_written % (size_of::<usize>() as u64); //align to system default word bit size. Expect 64 most of the time
-    // if align != 0 {
-    //     println!("padding: {} bytes", align);
-    //     for i in 0..align as usize {
-    //         buff_2bit[i] = NOOP_CODE;
-    //         buff_2bit_size += 1;
-    //     }
-    //     total_bytes_written += buf_writer(&mut params.writer, &buff_2bit, buff_2bit_size)? as u64;
-    //     buff_2bit_size = 0;
-    // }
-    // println!("");
+	if codon_dt.codon_buff_used > 0 {
+		codon_write_buf[codon_write_buf_size] = codon_dt.codon_buff as u8;
+		codon_dt.codon_buff >>= codon_dt.codon_buff_used;
+		codon_dt.codon_buff_used = 0;
+		codon_write_buf_size += 1;
+	}
+	if codon_write_buf_size > 0 {
+		_total_bytes_written += buf_writer(&mut code_bw, &codon_write_buf, codon_write_buf_size)?;
+		codon_write_buf_size = 0;
+	}
 	if add_padding {
 		code_bw.write_all(&PADDING_BUFF)?;
 		_total_bytes_written += 4;
 	}
-    code_bw.flush()?;
+	if params.data_fd.is_some() { data_bw.flush()?; }
+
+	code_bw.flush()?;
 
     Ok(())
 }
@@ -661,9 +597,9 @@ fn ms_bit_first_main(params: &mut Params, table:  &[u8; 256]) -> std::io::Result
     buf_line_reader(&mut params.reader, &mut params.ln_read_buf).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
 
 	let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
-	let mut buff_2bit_temp: u8 = 0;
-    let mut buff_2bit_size: usize = 0;
-    let mut temp_bits_used: u8 = 0;
+	let mut _buff_2bit_temp: u8 = 0;
+    let mut _buff_2bit_size: usize = 0;
+    let mut _temp_bits_used: u8 = 0;
     let mut _total_bytes_written: usize = 0;
 	if add_padding && params.read_buf_not_empty() {
 		code_bw.write_all(&PADDING_BUFF)?;
@@ -671,46 +607,46 @@ fn ms_bit_first_main(params: &mut Params, table:  &[u8; 256]) -> std::io::Result
 	}
     while params.read_buf_not_empty() {
         for c in params.ln_read_buf.bytes() {
-			buff_2bit_temp <<= bp_shift;
-			buff_2bit_temp += table[c as usize];
-			temp_bits_used += bp_shift;
-			if temp_bits_used == TEMP_BUFF_BITS {
-				buff_2bit[buff_2bit_size] = buff_2bit_temp;
-				temp_bits_used = 0;
-				buff_2bit_temp = 0;
-				buff_2bit_size += 1;
-				if buff_2bit_size == BUFFER_SIZE {
-					_total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)?;
-                    buff_2bit_size = 0;
+			_buff_2bit_temp <<= bp_shift;
+			_buff_2bit_temp += table[c as usize];
+			_temp_bits_used += bp_shift;
+			if _temp_bits_used == TEMP_BUFF_BITS {
+				buff_2bit[_buff_2bit_size] = _buff_2bit_temp;
+				_temp_bits_used = 0;
+				_buff_2bit_temp = 0;
+				_buff_2bit_size += 1;
+				if _buff_2bit_size == BUFFER_SIZE {
+					_total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, _buff_2bit_size)?;
+                    _buff_2bit_size = 0;
 				}
 			}
         }
         params.ln_read_buf.clear();
         buf_line_reader(&mut params.reader, &mut params.ln_read_buf)?;
     }
-    if buff_2bit_size == BUFFER_SIZE {
-        _total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)?;
-        buff_2bit_size = 0;
+    if _buff_2bit_size == BUFFER_SIZE {
+        _total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, _buff_2bit_size)?;
+        _buff_2bit_size = 0;
     }
-    if temp_bits_used > 0 {
-        buff_2bit[buff_2bit_size] = buff_2bit_temp;
-        temp_bits_used = 0;
-        buff_2bit_temp = 0;
-        buff_2bit_size += 1;
+    if _temp_bits_used > 0 {
+        buff_2bit[_buff_2bit_size] = _buff_2bit_temp;
+        _temp_bits_used = 0;
+        _buff_2bit_temp = 0;
+        _buff_2bit_size += 1;
 
     }
-    if buff_2bit_size > 0 {
-        _total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)?;
-        buff_2bit_size = 0;
+    if _buff_2bit_size > 0 {
+        _total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, _buff_2bit_size)?;
+        _buff_2bit_size = 0;
     }
     let align = _total_bytes_written % 4; //align to 32-bit words
     if align != 0 {
         for i in 0..align as usize {
             buff_2bit[i] = CODE_PADDING;
-            buff_2bit_size += 1;
+            _buff_2bit_size += 1;
         }
-        _total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)?;
-        buff_2bit_size = 0;
+        _total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, _buff_2bit_size)?;
+        _buff_2bit_size = 0;
     }
 	if add_padding {
 		code_bw.write_all(&PADDING_BUFF)?;
@@ -731,62 +667,62 @@ fn ls_bit_first_main(params: &mut Params, table: &[u8; 256]) -> std::io::Result<
 
 	let mut code_bw: BufWriter<&File> = BufWriter::new(&params.code_fd);
     buf_line_reader(&mut params.reader, &mut params.ln_read_buf).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
-    let mut buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
-	let mut buff_2bit_temp: u8 = 0;
-    let mut buff_2bit_size: usize = 0;
-    let mut temp_bits_used: u8 = 0;
-    let mut total_bytes_written: u64 = 0;
+    let mut _buff_2bit: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+	let mut _buff_2bit_temp: u8 = 0;
+    let mut _buff_2bit_size: usize = 0;
+    let mut _temp_bits_used: u8 = 0;
+    let mut _total_bytes_written: u64 = 0;
 	if add_padding && params.read_buf_not_empty() {
 		code_bw.write_all(&PADDING_BUFF)?;
-		total_bytes_written = 4;
+		_total_bytes_written = 4;
 	}
 
     while params.read_buf_not_empty() {
         for c in params.ln_read_buf.bytes() {
-			buff_2bit_temp += (table[c as usize]) << temp_bits_used;
-			temp_bits_used += bp_shift;
-			if temp_bits_used == TEMP_BUFF_BITS {
-				buff_2bit[buff_2bit_size] = buff_2bit_temp;
-				temp_bits_used = 0;
-				buff_2bit_temp = 0;
-				buff_2bit_size += 1;
-				if buff_2bit_size == BUFFER_SIZE {
-					total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
-                    buff_2bit_size = 0;
+			_buff_2bit_temp += (table[c as usize]) << _temp_bits_used;
+			_temp_bits_used += bp_shift;
+			if _temp_bits_used == TEMP_BUFF_BITS {
+				_buff_2bit[_buff_2bit_size] = _buff_2bit_temp;
+				_temp_bits_used = 0;
+				_buff_2bit_temp = 0;
+				_buff_2bit_size += 1;
+				if _buff_2bit_size == BUFFER_SIZE {
+					_total_bytes_written += buf_writer(&mut code_bw, &_buff_2bit, _buff_2bit_size)? as u64;
+                    _buff_2bit_size = 0;
 				}
 			}
         }
         params.ln_read_buf.clear();
         buf_line_reader(&mut params.reader, &mut params.ln_read_buf).unwrap_or_else(|e| { panic!("Failed to read line in open input file: {}", e); });
     }
-    if buff_2bit_size == BUFFER_SIZE {
-        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
-        buff_2bit_size = 0;
+    if _buff_2bit_size == BUFFER_SIZE {
+        _total_bytes_written += buf_writer(&mut code_bw, &_buff_2bit, _buff_2bit_size)? as u64;
+        _buff_2bit_size = 0;
     }
-    if temp_bits_used > 0 {
-        buff_2bit[buff_2bit_size] = buff_2bit_temp;
-        temp_bits_used = 0;
-        buff_2bit_temp = 0;
-        buff_2bit_size += 1;
+    if _temp_bits_used > 0 {
+        _buff_2bit[_buff_2bit_size] = _buff_2bit_temp;
+        _temp_bits_used = 0;
+        _buff_2bit_temp = 0;
+        _buff_2bit_size += 1;
 
     }
-    if buff_2bit_size > 0 {
-        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
-        buff_2bit_size = 0;
+    if _buff_2bit_size > 0 {
+        _total_bytes_written += buf_writer(&mut code_bw, &_buff_2bit, _buff_2bit_size)? as u64;
+        _buff_2bit_size = 0;
     }
-    let align = total_bytes_written % 4; //align to 32-bit word size
+    let align = _total_bytes_written % 4; //align to 32-bit word size
     if align != 0 {
         for i in 0..align as usize {
-            buff_2bit[i] = CODE_PADDING;
-            buff_2bit_size += 1;
+            _buff_2bit[i] = CODE_PADDING;
+            _buff_2bit_size += 1;
         }
-        total_bytes_written += buf_writer(&mut code_bw, &buff_2bit, buff_2bit_size)? as u64;
-        buff_2bit_size = 0;
+        _total_bytes_written += buf_writer(&mut code_bw, &_buff_2bit, _buff_2bit_size)? as u64;
+        _buff_2bit_size = 0;
     }
 
 	if add_padding {
 		code_bw.write_all(&PADDING_BUFF)?;
-		total_bytes_written += 4;
+		_total_bytes_written += 4;
 	}
     code_bw.flush()?;
     Ok(())
@@ -811,20 +747,45 @@ fn gen_sect_ent_data(sec_sizes: Vec<u32>, num_sections: u16) {
 }
 
 #[cfg(target_os="linux")]
-fn generate_elf_executable_code_only(code_len: u32) -> FileHeader {
-	let phead_size: usize = linux::get_header_size(2, 0);
-	let p_head_list: Vec<ELF32ProgHeaderEnt> = vec![ELF32ProgHeaderEnt::new(phead_size as u32), ELF32ProgHeaderEnt::with_params_flags(1, 0x1000, code_len, 0x05, 0x1000)];
-	//let sec_head_list: Vec<ELF32SectHeaderEnt> = vec![ELF32SectHeaderEnt::default(), ELF32SectHeaderEnt::with_params_flags(1, 1, 0x06, 0x1000, code_len, 0, 0, 16, 0)];
-	FileHeader::with_defaults(ELF32Header::new(0x1000,2), p_head_list)
+fn generate_elf_executable_code_only(code_len: u32, entry_byte_offset: u32) -> FileHeader {
+	let phead_size: usize = linux::get_header_size(3, 0);
+	let code_align = calc_alignment(phead_size as u32, SECTION_ALIGNMENT);
+
+	let p_head_list: Vec<ELF32ProgHeaderEnt> = vec![ELF32ProgHeaderEnt::new(phead_size as u32), ELF32ProgHeaderEnt::with_params(1, 0, code_align, SECTION_ALIGNMENT), ELF32ProgHeaderEnt::with_params_flags(1, code_align, code_len+(2*entry_byte_offset), 0x05, SECTION_ALIGNMENT)];
+	//let sec_head_list: Vec<ELF32SectHeaderEnt> = vec![ELF32SectHeaderEnt::default(), ELF32SectHeaderEnt::as_code(1, 0x1000, 0, code_len), ELF32SectHeaderEnt::as_shrtrtab(2, 0, )];
+	FileHeader::with_defaults(ELF32Header::new(code_align+entry_byte_offset,3), p_head_list)
+	//FileHeader::with_target_arch_abi(ELF32Header::new(code_align+entry_byte_offset, 3), p_head_list, 97, 40) //ARM RISC isa
 
 
 }
 
-fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
-	const ALIGN_FILE: usize = FILE_ALIGNMENT as usize;
+#[cfg(target_os="linux")]
+fn generate_elf_executable_header(sec_sizes: Vec<u32>, num_sections: u16, entry_byte_offset: u32) -> FileHeader {
+	if num_sections == 1 {
+		generate_elf_executable_code_only(sec_sizes[0], entry_byte_offset)
+	}
+	else {
+		let phead_size: usize = linux::get_header_size(4, 0);
+		let code_len = sec_sizes[0]+ 2*entry_byte_offset;
+		let code_sec_offset = calc_alignment(phead_size as u32, SECTION_ALIGNMENT);
+		let data_sec_offset = code_sec_offset + calc_alignment(code_len, SECTION_ALIGNMENT);
+		let p_head_list: Vec<ELF32ProgHeaderEnt> = vec![ELF32ProgHeaderEnt::new(phead_size as u32), ELF32ProgHeaderEnt::with_params(1, 0, code_sec_offset, SECTION_ALIGNMENT), ELF32ProgHeaderEnt::with_params_flags(1, code_sec_offset, code_len, 0x05, SECTION_ALIGNMENT), ELF32ProgHeaderEnt::with_params_flags(1, data_sec_offset, sec_sizes[1], 0x06, SECTION_ALIGNMENT)];
+		//let sec_head_list: Vec<ELF32SectHeaderEnt> = vec![ELF32SectHeaderEnt::default(), ELF32SectHeaderEnt::with_params_flags(1, 1, 0x06, 0x1000, code_len, 0, 0, 16, 0)];
+		FileHeader::with_defaults(ELF32Header::new(code_sec_offset+entry_byte_offset,4), p_head_list)
+		//FileHeader::with_target_arch_abi(ELF32Header::new(code_sec_offset+entry_byte_offset, 4), p_head_list, 97, 40) //ARM RISC isa
+	}
+
+
+
+}
+
+#[cfg(target_os="linux")]
+fn linux_elf_writer(params: &mut Params)  -> std::io::Result<()> {
+	const ALIGN_SECTION: usize = SECTION_ALIGNMENT as usize;
 	let mut f_sizes: Vec<u32> = Vec::new();
 	let code_size: u64 = params.code_fd.metadata()?.len();
 	let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
+	let entry_offset: u32 = if params.flag_check(BitFlags::CodeSectionPadding) { WORD_ALIGN_BYTES } else { 0 };
 	temp_reader.rewind()?;
 	f_sizes.push(code_size as u32);
 	let f_data_valid = params.flag_check(BitFlags::UseCodons) && params.data_fd.is_some();
@@ -832,30 +793,86 @@ fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
 		f_sizes.push(params.data_fd.as_ref().unwrap().metadata()?.len() as u32);
 	}
 
-	#[cfg(target_os="windows")]
-	let header = win::generate_win_executable_header(f_sizes.clone(), f_sizes.len() as u16);
-	#[cfg(target_os="linux")]
-	let header = generate_elf_executable_code_only(f_sizes[0]);
+	let header = generate_elf_executable_header(f_sizes.clone(), f_sizes.len() as u16, entry_offset);
 	let header_buff = header.serialize();
-	let mut bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
-	let buff_align: usize = ALIGN_FILE - (bytes_written % ALIGN_FILE);
+	let mut _bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
+	let buff_align: usize = ALIGN_SECTION - (_bytes_written % ALIGN_SECTION);
+	let mut write_buff: [u8; ALIGN_SECTION] = [HEADER_PADDING_BYTE; ALIGN_SECTION];
+	if buff_align < ALIGN_SECTION {
+		_bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
+	}
+	params.writer.flush()?;
+	for _full_reads in 0..f_sizes[0]/SECTION_ALIGNMENT {
+		temp_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("code.bin file reader error: {}", e); });
+		_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+	}
+	let mut end_vec: Vec<u8> = Vec::new();
+	let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
+	_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+	let align = ALIGN_SECTION - (code_data_end % ALIGN_SECTION);
+
+	if align > 0 {
+		write_buff = [CODE_PADDING; ALIGN_SECTION];
+		_bytes_written += buf_writer(&mut params.writer, &write_buff, align)?;
+	}
+	params.writer.flush()?;
+	if f_data_valid {
+		let mut data_reader: BufReader<&File> = BufReader::new(params.data_fd.as_mut().unwrap());
+		data_reader.rewind()?;
+		write_buff = [CODE_PADDING; ALIGN_SECTION];
+		for _full_buf in 0..f_sizes[1]/SECTION_ALIGNMENT {
+			data_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("data.bin file reader error: {}", e); });
+			_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+		}
+		params.writer.flush()?;
+		let mut end_vec: Vec<u8> = Vec::new();
+		let data_end = data_reader.read_to_end(&mut end_vec)?;
+		_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+		let align_data = ALIGN_SECTION - (data_end % ALIGN_SECTION);
+		if align_data > 0 {
+			write_buff = [CODE_PADDING; ALIGN_SECTION];
+			_bytes_written += buf_writer(&mut params.writer, &write_buff, align_data)?;
+		}
+		params.writer.flush()?;
+	}
+	Ok(())
+}
+
+#[cfg(target_os="windows")]
+fn win_exe_writer(params: &mut Params)  -> std::io::Result<()> {
+	const ALIGN_FILE: usize = FILE_ALIGNMENT as usize;
+	let mut f_sizes: Vec<u32> = Vec::new();
+	let code_size: u64 = params.code_fd.metadata()?.len();
+	let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
+	let entry_offset: u32 = if params.flag_check(BitFlags::CodeSectionPadding) { WORD_ALIGN_BYTES } else { 0 };
+	temp_reader.rewind()?;
+	f_sizes.push(code_size as u32);
+	let f_data_valid = params.flag_check(BitFlags::UseCodons) && params.data_fd.is_some();
+	if f_data_valid {
+		f_sizes.push(params.data_fd.as_ref().unwrap().metadata()?.len() as u32);
+	}
+
+	let header = win::generate_win_executable_header(f_sizes.clone(), f_sizes.len() as u16, entry_offset);
+	let header_buff = header.serialize();
+	let mut _bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
+	let buff_align: usize = ALIGN_FILE - (_bytes_written % ALIGN_FILE);
 	let mut write_buff: [u8; ALIGN_FILE] = [HEADER_PADDING_BYTE; ALIGN_FILE];
 	if buff_align < ALIGN_FILE {
-		bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
+		_bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
 	}
 	params.writer.flush()?;
 	for _full_reads in 0..f_sizes[0]/FILE_ALIGNMENT {
 		temp_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("code.bin file reader error: {}", e); });
-		bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
+		_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
 	}
 	let mut end_vec: Vec<u8> = Vec::new();
 	let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
-	bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+	_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
 	let align = ALIGN_FILE - (code_data_end % ALIGN_FILE);
 
 	if align > 0 {
 		write_buff = [CODE_PADDING; ALIGN_FILE];
-		bytes_written += buf_writer(&mut params.writer, &write_buff, align)?;
+		_bytes_written += buf_writer(&mut params.writer, &write_buff, align)?;
 	}
 	params.writer.flush()?;
 	if f_data_valid {
@@ -864,22 +881,27 @@ fn generate_executable(mut params: &mut Params) -> std::io::Result<()> {
 		write_buff = [CODE_PADDING; ALIGN_FILE];
 		for _full_buf in 0..f_sizes[1]/FILE_ALIGNMENT {
 			data_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("data.bin file reader error: {}", e); });
-			bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
+			_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
 		}
 		params.writer.flush()?;
 		let mut end_vec: Vec<u8> = Vec::new();
 		let data_end = data_reader.read_to_end(&mut end_vec)?;
-		bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+		_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
 		let align_data = ALIGN_FILE - (data_end % ALIGN_FILE);
 		if align_data > 0 {
 			write_buff = [CODE_PADDING; ALIGN_FILE];
-			bytes_written += buf_writer(&mut params.writer, &write_buff, align_data)?;
+			_bytes_written += buf_writer(&mut params.writer, &write_buff, align_data)?;
 		}
 		params.writer.flush()?;
 	}
 
-
 	Ok(())
+}
+fn generate_executable(params: &mut Params) -> std::io::Result<()> {
+	#[cfg(target_os="windows")]
+	return win_exe_writer(params);
+	#[cfg(target_os="linux")]
+	return linux_elf_writer(params);
 }
 fn remove_temp_files(temp_dir_p: &str, temp_files: Vec<&str>) -> std::io::Result<()> {
 	for item in temp_files {
@@ -916,6 +938,7 @@ fn main() -> std::io::Result<()> {
 		0b00_000|0b00_001 => ls_bit_first_main(&mut params, &table)?,
 		0b00_010|0b00_011 => ms_bit_first_main(&mut params, &table)?,
 		0b00_100|0b00_101 => codon_lsb_shift(&mut params, &table)?,
+		0b00_110|0b00_111 => codon_simple_left_shift(&mut params, &table)?,
 		_ => unreachable!(),
 	}
 	params.code_fd.sync_all()?;
@@ -929,12 +952,12 @@ fn main() -> std::io::Result<()> {
 }
 
 fn buf_writer<W: Write>(writer: &mut W, buf: &[u8], buff_len: usize) -> std::io::Result<usize> {
-	let mut written_bytes: usize = 0;
-	while written_bytes < buff_len {
-		let n: usize = writer.write(&buf[written_bytes..buff_len])?;
-		written_bytes += n;
+	let mut _written_bytes: usize = 0;
+	while _written_bytes < buff_len {
+		let n: usize = writer.write(&buf[_written_bytes..buff_len])?;
+		_written_bytes += n;
 	}
-	Ok(written_bytes)
+	Ok(_written_bytes)
 }
 
 fn buf_line_reader<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Result<usize> {

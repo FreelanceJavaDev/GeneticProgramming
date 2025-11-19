@@ -16,27 +16,87 @@ pub const CODE_PADDING: u8 = 0x90; // NO OPERATION opcode
 #[cfg(target_os="windows")]
 pub mod win  {
 	use crate::executable_header::Serialize;
-	pub const fn get_header_size(num_sections: usize) -> usize {
+	use crate::file_handler::*;
+	use std::io::{Read, Seek};
+
+	pub fn exe_writer(params: &mut Params)  -> std::io::Result<()> {
+		const ALIGN_FILE: usize = super::FILE_ALIGNMENT as usize;
+		let mut f_sizes: Vec<u32> = Vec::new();
+		let code_size: u64 = params.code_fd.metadata()?.len();
+		let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
+		let entry_offset: u32 = if params.flag_check(BitFlags::CodeSectionPadding) { super::WORD_ALIGN_BYTES } else { 0 };
+		temp_reader.rewind()?;
+		f_sizes.push(code_size as u32);
+		let f_data_valid = params.flag_check(BitFlags::UseCodons) && params.data_fd.is_some();
+		if f_data_valid {
+			f_sizes.push(params.data_fd.as_ref().unwrap().metadata()?.len() as u32);
+		}
+
+		let header = generate_executable_header(f_sizes.clone(), f_sizes.len() as u16, entry_offset);
+		let header_buff = header.serialize();
+		let mut _bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
+		let buff_align: usize = ALIGN_FILE - (_bytes_written % ALIGN_FILE);
+		let mut write_buff: [u8; ALIGN_FILE] = [super::HEADER_PADDING_BYTE; ALIGN_FILE];
+		if buff_align < ALIGN_FILE {
+			_bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
+		}
+		params.writer.flush()?;
+		for _full_reads in 0..f_sizes[0]/super::FILE_ALIGNMENT {
+			temp_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("code.bin file reader error: {}", e); });
+			_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
+		}
+		let mut end_vec: Vec<u8> = Vec::new();
+		let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
+		_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+		let align = ALIGN_FILE - (code_data_end % ALIGN_FILE);
+
+		if align > 0 {
+			write_buff = [super::CODE_PADDING; ALIGN_FILE];
+			_bytes_written += buf_writer(&mut params.writer, &write_buff, align)?;
+		}
+		params.writer.flush()?;
+		if f_data_valid {
+			let mut data_reader: BufReader<&File> = BufReader::new(params.data_fd.as_mut().unwrap());
+			data_reader.rewind()?;
+			write_buff = [super::CODE_PADDING; ALIGN_FILE];
+			for _full_buf in 0..f_sizes[1]/super::FILE_ALIGNMENT {
+				data_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("data.bin file reader error: {}", e); });
+				_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_FILE)?;
+			}
+			params.writer.flush()?;
+			let mut end_vec: Vec<u8> = Vec::new();
+			let data_end = data_reader.read_to_end(&mut end_vec)?;
+			_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+			let align_data = ALIGN_FILE - (data_end % ALIGN_FILE);
+			if align_data > 0 {
+				write_buff = [super::CODE_PADDING; ALIGN_FILE];
+				_bytes_written += buf_writer(&mut params.writer, &write_buff, align_data)?;
+			}
+			params.writer.flush()?;
+		}
+
+		Ok(())
+	}
+
+	const fn get_header_size(num_sections: usize) -> usize {
 		use std::mem::size_of;
 		size_of::<InitFileHeader>() + size_of::<ImageNTHeaders32>() + (size_of::<ImageSectionHeaderEnt>() * num_sections)
 	}
 
-	pub fn calc_alignment(len: u32, align_val: u32) -> u32 {
+	fn calc_alignment(len: u32, align_val: u32) -> u32 {
 		(match len % align_val {
 			0 => len/align_val,
 			_ => (len/align_val) + 1,
 		})*align_val
 	}
 
-	pub fn generate_win_executable_header(sec_sizes: Vec<u32>, num_sections: u16, entry_byte_offset: u32) -> HeaderPE {
-	//let code_len = sec_sizes[0];
-	if num_sections == 1 { return generate_win_executable_code_only(sec_sizes[0], entry_byte_offset); }
-	else { return generate_win_executable_code_data(sec_sizes, entry_byte_offset); }
-
-}
+	fn generate_executable_header(sec_sizes: Vec<u32>, num_sections: u16, entry_byte_offset: u32) -> HeaderPE {
+		if num_sections == 1 { return generate_executable_code_only(sec_sizes[0], entry_byte_offset); }
+		else { return generate_executable_code_data(sec_sizes, entry_byte_offset); }
+	}
 
 
-	fn generate_win_executable_code_only(code_len: u32, entry_byte_offset: u32) -> HeaderPE {
+	fn generate_executable_code_only(code_len: u32, entry_byte_offset: u32) -> HeaderPE {
 		let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
 		let header_data_len: u32 = get_header_size(1) as u32;
 		let header_file_align: u32 = calc_alignment(header_data_len, super::FILE_ALIGNMENT);
@@ -47,7 +107,7 @@ pub mod win  {
 		HeaderPE::with_defaults(1, opt_file_header, vec![ImageSectionHeaderEnt::with_defaults(*b".text\0\0\0", code_len, header_va_offset, sec_file_align, header_file_align)])
 	}
 
-	fn generate_win_executable_code_data(sec_sizes: Vec<u32>, entry_byte_offset: u32) -> HeaderPE {
+	fn generate_executable_code_data(sec_sizes: Vec<u32>, entry_byte_offset: u32) -> HeaderPE {
 		let data_dir_list: [ImageDataDirectory; 16] = [ImageDataDirectory::default(); 16];
 
 		let header_data_len: u32 = get_header_size(2) as u32;
@@ -349,17 +409,110 @@ pub mod win  {
 #[cfg(target_os="linux")]
 pub mod linux {
 	use crate::executable_header::Serialize;
+	use crate::file_handler::*;
+	use std::io::{Read, Seek};
+
 	const ELF32_VADDR_OFFSET: u32 = 0x08048000;
-	pub const fn get_header_size(num_prog_headers: usize, num_sections: usize) -> usize {
+	pub fn elf_writer(params: &mut Params)  -> std::io::Result<()> {
+		const ALIGN_SECTION: usize = super::SECTION_ALIGNMENT as usize;
+		let mut f_sizes: Vec<u32> = Vec::new();
+		let code_size: u64 = params.code_fd.metadata()?.len();
+		let mut temp_reader: BufReader<&File> = BufReader::new(&params.code_fd);
+		let entry_offset: u32 = if params.flag_check(BitFlags::CodeSectionPadding) { super::WORD_ALIGN_BYTES } else { 0 };
+		temp_reader.rewind()?;
+		f_sizes.push(code_size as u32);
+		let f_data_valid = params.flag_check(BitFlags::UseCodons) && params.data_fd.is_some();
+		if f_data_valid {
+			f_sizes.push(params.data_fd.as_ref().unwrap().metadata()?.len() as u32);
+		}
+
+		let header = generate_elf_executable_header(f_sizes.clone(), f_sizes.len() as u16, entry_offset);
+		let header_buff = header.serialize();
+		let mut _bytes_written: usize = buf_writer(&mut params.writer, &header_buff.as_slice(), header_buff.len())?;
+		let buff_align: usize = ALIGN_SECTION - (_bytes_written % ALIGN_SECTION);
+		let mut write_buff: [u8; ALIGN_SECTION] = [super::HEADER_PADDING_BYTE; ALIGN_SECTION];
+		if buff_align < ALIGN_SECTION {
+			_bytes_written += buf_writer(&mut params.writer, &write_buff, buff_align)?;
+		}
+		params.writer.flush()?;
+		for _full_reads in 0..f_sizes[0]/super::SECTION_ALIGNMENT {
+			temp_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("code.bin file reader error: {}", e); });
+			_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+		}
+		let mut end_vec: Vec<u8> = Vec::new();
+		let code_data_end = temp_reader.read_to_end(&mut end_vec)?;
+		_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+		let align = ALIGN_SECTION - (code_data_end % ALIGN_SECTION);
+
+		if align > 0 {
+			write_buff = [super::CODE_PADDING; ALIGN_SECTION];
+			_bytes_written += buf_writer(&mut params.writer, &write_buff, align)?;
+		}
+		params.writer.flush()?;
+		if f_data_valid {
+			let mut data_reader: BufReader<&File> = BufReader::new(params.data_fd.as_mut().unwrap());
+			data_reader.rewind()?;
+			write_buff = [super::CODE_PADDING; ALIGN_SECTION];
+			for _full_buf in 0..f_sizes[1]/super::SECTION_ALIGNMENT {
+				data_reader.read_exact(&mut write_buff).unwrap_or_else(|e| { panic!("data.bin file reader error: {}", e); });
+				_bytes_written += buf_writer(&mut params.writer, &write_buff,ALIGN_SECTION)?;
+			}
+			params.writer.flush()?;
+			let mut end_vec: Vec<u8> = Vec::new();
+			let data_end = data_reader.read_to_end(&mut end_vec)?;
+			_bytes_written += buf_writer(&mut params.writer, end_vec.as_slice(), end_vec.len())?;
+			let align_data = ALIGN_SECTION - (data_end % ALIGN_SECTION);
+			if align_data > 0 {
+				write_buff = [super::CODE_PADDING; ALIGN_SECTION];
+				_bytes_written += buf_writer(&mut params.writer, &write_buff, align_data)?;
+			}
+			params.writer.flush()?;
+		}
+		Ok(())
+	}
+	const fn get_header_size(num_prog_headers: usize, num_sections: usize) -> usize {
 		use std::mem::size_of;
 		size_of::<ELF32Header>() + (size_of::<ELF32ProgHeaderEnt>()*num_prog_headers)  + (size_of::<ELF32SectHeaderEnt>() * num_sections) + 24
 	}
 
-	pub fn calc_alignment(len: u32, align_val: u32) -> u32 {
+	fn calc_alignment(len: u32, align_val: u32) -> u32 {
 		(match len % align_val {
 			0 => len/align_val,
 			_ => (len/align_val) + 1,
 		})*align_val
+	}
+
+	fn generate_elf_executable_code_only(code_len: u32, entry_byte_offset: u32) -> FileHeader {
+		let phead_size: usize = get_header_size(3, 0);
+		let code_align = calc_alignment(phead_size as u32, super::SECTION_ALIGNMENT);
+
+		let p_head_list: Vec<ELF32ProgHeaderEnt> = vec![ELF32ProgHeaderEnt::new(phead_size as u32),
+			ELF32ProgHeaderEnt::with_params(1, 0, code_align, super::SECTION_ALIGNMENT),
+			ELF32ProgHeaderEnt::with_params_flags(1, code_align, code_len+(2*entry_byte_offset), 0x05, super::SECTION_ALIGNMENT)
+		];
+		//let sec_head_list: Vec<ELF32SectHeaderEnt> = vec![ELF32SectHeaderEnt::default(), ELF32SectHeaderEnt::as_code(1, 0x1000, 0, code_len), ELF32SectHeaderEnt::as_shrtrtab(2, 0, )];
+		FileHeader::with_defaults(ELF32Header::new(code_align+entry_byte_offset,3), p_head_list)
+		//FileHeader::with_target_arch_abi(ELF32Header::new(code_align+entry_byte_offset, 3), p_head_list, 97, 40) //ARM RISC isa
+	}
+
+	fn generate_elf_executable_header(sec_sizes: Vec<u32>, num_sections: u16, entry_byte_offset: u32) -> FileHeader {
+		if num_sections == 1 {
+			generate_elf_executable_code_only(sec_sizes[0], entry_byte_offset)
+		}
+		else {
+			let phead_size: usize = get_header_size(4, 0);
+			let code_len = sec_sizes[0]+ 2*entry_byte_offset;
+			let code_sec_offset = calc_alignment(phead_size as u32, super::SECTION_ALIGNMENT);
+			let data_sec_offset = code_sec_offset + calc_alignment(code_len, super::SECTION_ALIGNMENT);
+			let p_head_list: Vec<ELF32ProgHeaderEnt> = vec![ELF32ProgHeaderEnt::new(phead_size as u32),
+				ELF32ProgHeaderEnt::with_params(1, 0, code_sec_offset, super::SECTION_ALIGNMENT),
+				ELF32ProgHeaderEnt::with_params_flags(1, code_sec_offset, code_len, 0x05, super::SECTION_ALIGNMENT),
+				ELF32ProgHeaderEnt::with_params_flags(1, data_sec_offset, sec_sizes[1], 0x06, super::SECTION_ALIGNMENT)
+			];
+			//let sec_head_list: Vec<ELF32SectHeaderEnt> = vec![ELF32SectHeaderEnt::default(), ELF32SectHeaderEnt::with_params_flags(1, 1, 0x06, 0x1000, code_len, 0, 0, 16, 0)];
+			FileHeader::with_defaults(ELF32Header::new(code_sec_offset+entry_byte_offset,4), p_head_list)
+			//FileHeader::with_target_arch_abi(ELF32Header::new(code_sec_offset+entry_byte_offset, 4), p_head_list, 97, 40) //ARM RISC isa
+		}
 	}
 #[derive(Clone)]
 #[repr(C)]

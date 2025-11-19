@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::{OsString, OsStr};
-use std::fs::{File, OpenOptions};
+pub(crate) use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 

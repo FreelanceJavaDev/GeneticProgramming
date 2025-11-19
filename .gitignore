@@ -24,3 +24,4 @@ test_data/CP065936_cp_sci_BW.exe
 test_data/GCA_003367075_2_ASM336707v2_genomic.fna
 /.vscode
 main
+src/unused_code.rs

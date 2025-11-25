@@ -1,6 +1,19 @@
-
 pub trait Serialize {
 	fn serialize(&self) -> Vec<u8>;
+}
+
+#[cfg(target_os="windows")]
+pub type ExecHeader = win::HeaderPE;
+#[cfg(target_os="linux")]
+pub type ExecHeader = linux::FileHeader;
+
+
+pub fn generate_executable(params: &mut crate::file_handler::Params) -> std::io::Result<ExecHeader> {
+	#[cfg(target_os="windows")]
+	let ret :ExecHeader = win::exe_writer(params)?;
+	#[cfg(target_os="linux")]
+	let ret: ExecHeader = linux::elf_writer(params)?;
+	Ok(ret)
 }
 
 pub const SECTION_ALIGNMENT: u32 = 0x1000;
@@ -13,13 +26,14 @@ pub const WORD_ALIGN_BYTES: u32 = 4; ///32-bit alignment = 4 bytes
 pub const CODE_PADDING: u8 = 0xCC; // INT3 opcode
 #[cfg(not(target_os="windows"))]
 pub const CODE_PADDING: u8 = 0x90; // NO OPERATION opcode
+
 #[cfg(target_os="windows")]
 pub mod win  {
 	use crate::executable_header::Serialize;
 	use crate::file_handler::*;
 	use std::io::{Read, Seek};
 
-	pub fn exe_writer(params: &mut Params)  -> std::io::Result<()> {
+	pub fn exe_writer(params: &mut Params)  -> std::io::Result<HeaderPE> {
 		const ALIGN_FILE: usize = super::FILE_ALIGNMENT as usize;
 		let mut f_sizes: Vec<u32> = Vec::new();
 		let code_size: u64 = params.code_fd.metadata()?.len();
@@ -75,7 +89,7 @@ pub mod win  {
 			params.writer.flush()?;
 		}
 
-		Ok(())
+		Ok(header)
 	}
 
 	const fn get_header_size(num_sections: usize) -> usize {
@@ -411,9 +425,8 @@ pub mod linux {
 	use crate::executable_header::Serialize;
 	use crate::file_handler::*;
 	use std::io::{Read, Seek};
-
 	const ELF32_VADDR_OFFSET: u32 = 0x08048000;
-	pub fn elf_writer(params: &mut Params)  -> std::io::Result<()> {
+	pub fn elf_writer(params: &mut Params)  -> std::io::Result<FileHeader> {
 		const ALIGN_SECTION: usize = super::SECTION_ALIGNMENT as usize;
 		let mut f_sizes: Vec<u32> = Vec::new();
 		let code_size: u64 = params.code_fd.metadata()?.len();
@@ -468,7 +481,7 @@ pub mod linux {
 			}
 			params.writer.flush()?;
 		}
-		Ok(())
+		Ok(header)
 	}
 	const fn get_header_size(num_prog_headers: usize, num_sections: usize) -> usize {
 		use std::mem::size_of;

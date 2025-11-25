@@ -1,23 +1,41 @@
 use std::env;
-pub enum ProcessorEnv{
-	Unsupported =-1,
-	WIA64,
-	WAMD64,
-	WARM64,
-	Wx86,
-}
 //TODO use rust cfg target_arch and target_os
 //TODO: retrieve processor architecture
 // Windows env string: PROCESSOR_ARCHITECTURE
-// Possible outputs: AMD64, IA64, ARM64 or x86
+// Possible outputs: AMD64, IA64, ARM64 or x86 - use x86 for AMD64, IA64, x86-64 or x86, ARM used for ARM64 (TODO)
 //TODO: retrieve processor architecture on linux (env var and possible outputs)
+/**
+ * X86 opcode format: Maximum of 15 byte instructions allowed
+ * Optional prefixes:
+ *	Instruction Prefix (0 or 1 byte)
+ *  Address-size Prefix (0 or 1 byte)
+ *  Operand-size Prefix (0 or 1 byte)
+ *  Segment Override (0 or 1 byte)
+ *
+ * General instruction format:
+ * 	Opcode (1 or 2 bytes)
+ *  Mode/reg/mem (0 or 1 byte)
+ * 			bit: |0 1 2|3 4 5| 6 7|
+ * 		Meaning: | R/M |R/Opc|Mode|
+ *	Scaled Index Byte (0 or 1 byte)
+ *			bit: |0 1 2|3 4 5| 6 7 |
+ * 		Meaning: |Base |Index|Scale|
+ *	Displacement (0, 1, 2 or 4 bytes)
+ *	Immediate (0, 1, 2 or 4 bytes)
+ */
 
-//x86 has two important bytes: 1st byte = is opcode or a opcode group specifier,
-//2nd byte is Mod R/M byte, if group specifier then the reg field holds the opcode specifier
-//
+#[cfg(not(target_arch="arm"))]
+#[repr(C)]
+pub struct OpCodeValidator {
+
+}
 
 
 
+
+
+
+//ARM 32-bit all instructions are 32 bits long, but field sizes can vary
 #[cfg(target_arch="arm")]
 #[repr(u8)]
 pub enum CondBits {
@@ -25,7 +43,7 @@ pub enum CondBits {
 	NE, // !=
 	CS, // If carry flag set.
     CC, // If Carry flag cleared.
-    MI, // Minus, negitive.
+    MI, // Minus, negative.
     PL, // Plus, positive.
     VS, // Overflow flag set.
     VC, // Overflow Flag cleared.
@@ -35,6 +53,6 @@ pub enum CondBits {
     LT, // Less than, signed.
     GT, // Greater or equal, signed.
     LE, // Less than or equal, signed.
-    AL, // Always do.
+    AL, // Always do (no condition).
     NV  // RESERVED, used to extend opcodes in later ARMs.
 }

@@ -45,8 +45,18 @@ impl Params {
 			EncodingMethod::INVALID => [255, 255, 255, 255],
         }
     }
+
 	pub fn read_buf_not_empty(&self) -> bool { !self.ln_read_buf.is_empty() }
+
+	pub fn get_bp_bit_len(&self) -> u8 {
+		match self.compile_encode {
+			EncodingMethod::M3A0C1 | EncodingMethod::M3A1C0 | EncodingMethod::M3A0C1XOR | EncodingMethod::M3A1C0XOR => 1,
+			_ => 2,
+		}
+	}
+
 	pub fn flag_check(&self, mask : BitFlags) -> bool { self.flags & mask as u8 > 0 }
+
 	pub fn sync_files(&mut self) -> std::io::Result<()> {
 		self.code_fd.sync_all()?;
 		if self.flag_check(BitFlags::UseCodons) && self.data_fd.is_some() {
@@ -54,6 +64,7 @@ impl Params {
 		}
 		Ok(())
 	}
+
 	#[inline(always)]
 	fn method1_ascii_to_2bit_convert(&self, c: u8) -> u8 { (c & 0x06) >> 1 }
 }

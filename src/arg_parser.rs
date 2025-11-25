@@ -33,7 +33,7 @@ pub enum EncodingMethod {
 pub enum BitFlags {
 	NoFlags,
 	CodeSectionPadding = 0b00_001,
-	SimpleLeftShift = 0b00_010,
+	FixedLeftShift = 0b00_010,
 	UseCodons = 0b00_100,
 	CodonData = 0b01_000,
 	InPlace = 0b10_000
@@ -164,7 +164,7 @@ fn check_flags(flag_list: Vec<&str>, dir_path: &Path) -> std::io::Result<u8> {
 	for flag_str in flag_list {
 		ret |= match flag_str {
 			"-p"|"--padding" => BitFlags::CodeSectionPadding as u8,
-			"-sls"|"--simple-lshift" => BitFlags::SimpleLeftShift as u8,
+			"-fls"|"--fixed-lshift" => BitFlags::FixedLeftShift as u8,
 			"--use-codon"|"-uc3" => BitFlags::UseCodons as u8,
 			"--in-place"|"-inp" => BitFlags::InPlace as u8,
 			"--codon-data"|"-ctd" => BitFlags::CodonData as u8,
